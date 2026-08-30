@@ -9,7 +9,7 @@ import secrets
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import cast
 
@@ -64,14 +64,10 @@ class AgentStore:
         runtime_id: str,
         *,
         clock: Callable[[], float] = time.time,
-        legacy_candidates: Iterable[Path] = (),
     ) -> None:
         self.path = path.expanduser().resolve()
         self.runtime_id = runtime_id
         self._clock = clock
-        self._legacy_candidates = tuple(
-            candidate.expanduser().resolve() for candidate in legacy_candidates
-        )
         self._initialized = False
 
     def current_time(self) -> float:
@@ -199,10 +195,7 @@ class AgentStore:
     def _ensure_initialized_sync(self) -> None:
         if self._initialized:
             return
-        migrate_database(
-            self.path,
-            legacy_candidates=self._legacy_candidates,
-        )
+        migrate_database(self.path)
         self._initialized = True
 
     def _initialize_and_reconcile_sync(self) -> None:

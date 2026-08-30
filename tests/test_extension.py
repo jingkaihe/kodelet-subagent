@@ -309,17 +309,21 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         FakeClient.run_release.set()
         FakeClient.startup_release.set()
         FakeClient.close_release.set()
-        for live in list(self.runtime.live_runs.values()):
+        for live in list(self.runtime.owned_runs.values()):
+            background_lease = live.background_lease
+            if isinstance(background_lease, FakeBackgroundTaskLease):
+                background_lease.close_release.set()
             if live.runner_task is not None and not live.runner_task.done():
                 live.runner_task.cancel()
         await asyncio.gather(
             *(
                 live.runner_task
-                for live in list(self.runtime.live_runs.values())
+                for live in list(self.runtime.owned_runs.values())
                 if live.runner_task is not None
             ),
             return_exceptions=True,
         )
+        await asyncio.gather(*self.runtime.cleanup_tasks, return_exceptions=True)
         self.environment_patch.stop()
         self._temp.cleanup()
 
@@ -385,6 +389,8 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(other_application.runtime, other_runtime)
         self.assertIsNot(self.runtime.stores, other_runtime.stores)
         self.assertIsNot(self.runtime.live_runs, other_runtime.live_runs)
+        self.assertIsNot(self.runtime.owned_runs, other_runtime.owned_runs)
+        self.assertIsNot(self.runtime.cleanup_tasks, other_runtime.cleanup_tasks)
         for removed_alias in (
             "_stores",
             "_live_runs",
@@ -465,13 +471,13 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
 
         with sqlite3.connect(expected_path) as connection:
             journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
-            user_version = connection.execute("PRAGMA user_version").fetchone()[0]
+            revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
             tables = {
                 row[0]
                 for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             }
         self.assertEqual(journal_mode, "wal")
-        self.assertEqual(user_version, 1)
+        self.assertEqual(revision, "0001_initial")
         self.assertTrue({"agents", "runs", "steering_messages"} <= tables)
 
         self.runtime.stores.clear()
@@ -1147,6 +1153,160 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.close_calls, 1)
         self.assertEqual(session.close_calls, 1)
         self.assertEqual(background_lease.close_calls, 1)
+        self.assertEqual(self.runtime.owned_runs, {})
+
+    async def test_completed_run_remains_owned_until_background_lease_release(
+        self,
+    ) -> None:
+        context = self.context(block_background_release=True)
+        spawned = await self.app.spawn_agent(
+            extension.SpawnAgentInput(
+                name="lease-cleanup-worker",
+                task="finish before lease release",
+                context_mode="fresh",
+            ),
+            context,
+        )
+        agent_id = spawned["data"]["agent_id"]
+        store = await self.runtime.store_for_context(context)
+        background_lease = context.background_leases[0]
+
+        await asyncio.wait_for(background_lease.close_started.wait(), timeout=1)
+        key = self.runtime.live_run_key(store, agent_id)
+        live = self.runtime.live_runs[key]
+        self.assertTrue(FakeClient.instances[0].closed)
+        self.assertIsNotNone(live.cleanup_task)
+        self.assertIn(live.cleanup_task, self.runtime.cleanup_tasks)
+
+        shutdown = asyncio.create_task(self.runtime.shutdown())
+        await asyncio.sleep(0)
+        self.assertFalse(shutdown.done())
+        self.assertIn(key, self.runtime.live_runs)
+
+        background_lease.close_release.set()
+        await asyncio.wait_for(shutdown, timeout=1)
+
+        self.assertEqual(background_lease.close_calls, 1)
+        self.assertNotIn(key, self.runtime.live_runs)
+        self.assertEqual(self.runtime.owned_runs, {})
+        self.assertEqual(self.runtime.cleanup_tasks, set())
+
+    async def test_shutdown_during_client_close_still_releases_background_lease(
+        self,
+    ) -> None:
+        context = self.context()
+        FakeClient.block_close = True
+        spawned = await self.app.spawn_agent(
+            extension.SpawnAgentInput(
+                name="client-cleanup-worker",
+                task="finish before client close",
+                context_mode="fresh",
+            ),
+            context,
+        )
+        agent_id = spawned["data"]["agent_id"]
+        store = await self.runtime.store_for_context(context)
+        background_lease = context.background_leases[0]
+
+        await asyncio.wait_for(FakeClient.close_started.wait(), timeout=1)
+        key = self.runtime.live_run_key(store, agent_id)
+        self.assertIn(key, self.runtime.live_runs)
+        self.assertEqual(background_lease.close_calls, 0)
+
+        shutdown = asyncio.create_task(self.runtime.shutdown())
+        await asyncio.sleep(0)
+        self.assertFalse(shutdown.done())
+        self.assertIn(key, self.runtime.live_runs)
+
+        FakeClient.close_release.set()
+        await asyncio.wait_for(shutdown, timeout=1)
+
+        client = FakeClient.instances[0]
+        self.assertTrue(client.closed)
+        self.assertEqual(client.close_calls, 1)
+        self.assertEqual(background_lease.close_calls, 1)
+        self.assertNotIn(key, self.runtime.live_runs)
+        self.assertEqual(self.runtime.owned_runs, {})
+        self.assertEqual(self.runtime.cleanup_tasks, set())
+
+    async def test_shutdown_owns_prior_run_during_immediate_followup(self) -> None:
+        context = self.context()
+        FakeClient.block_runs = True
+        spawned = await self.app.spawn_agent(
+            extension.SpawnAgentInput(
+                name="handoff-worker",
+                task="first generation",
+                context_mode="fresh",
+            ),
+            context,
+        )
+        agent_id = spawned["data"]["agent_id"]
+        first_run_id = spawned["data"]["run_id"]
+        await asyncio.wait_for(FakeClient.run_started.wait(), timeout=1)
+        store = await self.runtime.store_for_context(context)
+        first_live = self.runtime.get_live_run(store, agent_id)
+        assert first_live is not None
+        first_runner = first_live.runner_task
+        assert first_runner is not None
+        first_client = FakeClient.instances[0]
+        first_background_lease = context.background_leases[0]
+
+        terminal_committed = asyncio.Event()
+        terminal_release = asyncio.Event()
+        original_terminal = store.terminal
+
+        async def delayed_terminal(*args: Any, **kwargs: Any) -> Any:
+            record = await original_terminal(*args, **kwargs)
+            lease = args[0]
+            status = args[1]
+            if lease.run_id == first_run_id and status == "idle":
+                terminal_committed.set()
+                await terminal_release.wait()
+            return record
+
+        shutdown: asyncio.Task[None] | None = None
+        with mock.patch.object(store, "terminal", new=delayed_terminal):
+            FakeClient.run_release.set()
+            await asyncio.wait_for(terminal_committed.wait(), timeout=1)
+            persisted = await store.get(context.conversation_id, agent_id)
+            self.assertEqual(persisted.run.status, "completed")
+            self.assertIsNone(first_live.cleanup_task)
+
+            FakeClient.run_release = asyncio.Event()
+            FakeClient.run_started = asyncio.Event()
+            followup = await self.app.followup_agent(
+                extension.FollowupAgentInput(
+                    agent_id=agent_id,
+                    task="second generation",
+                ),
+                context,
+            )
+            await asyncio.wait_for(FakeClient.run_started.wait(), timeout=1)
+            second_live = self.runtime.get_live_run(store, agent_id)
+            assert second_live is not None
+            self.assertEqual(second_live.run_id, followup["data"]["run_id"])
+            self.assertIsNot(second_live, first_live)
+            self.assertIn(
+                self.runtime.owned_run_key(store, first_run_id),
+                self.runtime.owned_runs,
+            )
+            self.assertIn(
+                self.runtime.owned_run_key(store, second_live.run_id),
+                self.runtime.owned_runs,
+            )
+
+            shutdown = asyncio.create_task(self.runtime.shutdown())
+            try:
+                await asyncio.wait_for(asyncio.shield(shutdown), timeout=1)
+                self.assertTrue(first_runner.done())
+                self.assertTrue(first_client.closed)
+                self.assertEqual(first_background_lease.close_calls, 1)
+                self.assertEqual(context.background_leases[1].close_calls, 1)
+                self.assertEqual(self.runtime.owned_runs, {})
+            finally:
+                terminal_release.set()
+                if not shutdown.done():
+                    await asyncio.wait_for(shutdown, timeout=1)
 
     async def test_startup_timeout_is_persisted_as_failure(self) -> None:
         context = self.context()
@@ -1356,6 +1516,7 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.runtime.setup_tasks, set())
         self.assertEqual(self.runtime.live_runs, {})
+        self.assertEqual(self.runtime.owned_runs, {})
         store = next(iter(self.runtime.stores.values()))
         self.assertEqual(await store.list(context.conversation_id), [])
         self.assertEqual(background_lease.close_calls, 1)

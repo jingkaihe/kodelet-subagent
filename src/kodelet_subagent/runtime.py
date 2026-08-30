@@ -46,7 +46,6 @@ BACKGROUND_LEASE_RELEASE_RETRY_MAX_SECONDS = 2.0
 STEERING_POLL_SECONDS = 0.1
 STEERING_RETRY_SECONDS = 0.25
 RECURSION_GUARD_ENV = "KODELET_SUBAGENT_EXTENSION_CHILD"
-LEGACY_DATA_DIRECTORY = "jingkaihe@skills_subagent"
 
 
 class SessionSteerResult(TypedDict):
@@ -109,6 +108,7 @@ class LiveRun:
     lease: Lease = field(repr=False)
     conversation_id: str | None = None
     runner_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    cleanup_task: asyncio.Task[None] | None = field(default=None, repr=False)
     client: AgentClient | None = field(default=None, repr=False)
     session: SteeringSession | None = field(default=None, repr=False)
     parent_canceled: bool = False
@@ -131,7 +131,9 @@ class RuntimeState:
         self.client_factory = client_factory
         self.stores: dict[Path, AgentStore] = {}
         self.live_runs: dict[tuple[Path, str], LiveRun] = {}
+        self.owned_runs: dict[tuple[Path, str], LiveRun] = {}
         self.setup_tasks: set[asyncio.Task[Any]] = set()
+        self.cleanup_tasks: set[asyncio.Task[None]] = set()
         self.reservation_completions: set[asyncio.Future[None]] = set()
         self.widget_locks: dict[tuple[Path, str], asyncio.Lock] = {}
         self.shutting_down = False
@@ -145,22 +147,11 @@ class RuntimeState:
     def database_path(ctx: ToolContext | EventContext) -> Path:
         return Path(ctx.storage.data_dir).resolve() / DATABASE_FILENAME
 
-    @staticmethod
-    def legacy_database_candidates(
-        ctx: ToolContext | EventContext,
-    ) -> tuple[Path, ...]:
-        data_dir = Path(ctx.storage.data_dir).resolve()
-        return (data_dir.parent / LEGACY_DATA_DIRECTORY / DATABASE_FILENAME,)
-
     async def store_for_context(self, ctx: ToolContext | EventContext) -> AgentStore:
         path = self.database_path(ctx)
         store = self.stores.get(path)
         if store is None:
-            store = AgentStore(
-                path,
-                self.runtime_id,
-                legacy_candidates=self.legacy_database_candidates(ctx),
-            )
+            store = AgentStore(path, self.runtime_id)
             self.stores[path] = store
         await store.initialize()
         return store
@@ -168,6 +159,10 @@ class RuntimeState:
     @staticmethod
     def live_run_key(store: AgentStore, agent_id: str) -> tuple[Path, str]:
         return store.path, agent_id
+
+    @staticmethod
+    def owned_run_key(store: AgentStore, run_id: str) -> tuple[Path, str]:
+        return store.path, run_id
 
     def get_live_run(self, store: AgentStore, agent_id: str) -> LiveRun | None:
         return self.live_runs.get(self.live_run_key(store, agent_id))
@@ -607,17 +602,76 @@ class RuntimeState:
             )
             await stop_heartbeat()
         finally:
+            cleanup_task = self._start_live_run_cleanup(
+                live,
+                client,
+                steering_task,
+                heartbeat_task,
+            )
+            await self._await_live_run_cleanup(cleanup_task)
+
+    def _start_live_run_cleanup(
+        self,
+        live: LiveRun,
+        client: AgentClient | None,
+        steering_task: asyncio.Task[None] | None,
+        heartbeat_task: asyncio.Task[None] | None,
+    ) -> asyncio.Task[None]:
+        existing = live.cleanup_task
+        if existing is not None:
+            return existing
+        cleanup_task = asyncio.create_task(
+            self._cleanup_live_run(
+                live,
+                client,
+                steering_task,
+                heartbeat_task,
+            ),
+            name=f"kodelet-{live.agent_id}-{live.generation}-cleanup",
+        )
+        live.cleanup_task = cleanup_task
+        self.cleanup_tasks.add(cleanup_task)
+        cleanup_task.add_done_callback(self.cleanup_tasks.discard)
+        return cleanup_task
+
+    @staticmethod
+    async def _await_live_run_cleanup(cleanup_task: asyncio.Task[None]) -> None:
+        canceled = False
+        while True:
+            try:
+                await asyncio.shield(cleanup_task)
+                break
+            except asyncio.CancelledError:
+                if cleanup_task.cancelled():
+                    raise
+                canceled = True
+        if canceled:
+            raise asyncio.CancelledError()
+
+    async def _cleanup_live_run(
+        self,
+        live: LiveRun,
+        client: AgentClient | None,
+        steering_task: asyncio.Task[None] | None,
+        heartbeat_task: asyncio.Task[None] | None,
+    ) -> None:
+        try:
             await self.stop_task(steering_task)
-            await stop_heartbeat()
+            await self.stop_task(heartbeat_task)
             if client is not None:
                 with contextlib.suppress(Exception):
                     await client.close()
             live.client = None
             live.session = None
+            await self.close_background_lease(live)
+        finally:
             key = self.live_run_key(live.store, live.agent_id)
             if self.live_runs.get(key) is live:
                 self.live_runs.pop(key, None)
-            await self.close_background_lease(live)
+            owned_key = self.owned_run_key(live.store, live.run_id)
+            if self.owned_runs.get(owned_key) is live:
+                self.owned_runs.pop(owned_key, None)
+            live.cleanup_task = None
 
     async def close_background_lease(self, live: LiveRun) -> None:
         lease = live.background_lease
@@ -628,12 +682,8 @@ class RuntimeState:
             try:
                 await lease.close()
             except asyncio.CancelledError:
-                if self.shutting_down:
-                    return
                 raise
             except Exception:
-                if self.shutting_down:
-                    return
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(
                     BACKGROUND_LEASE_RELEASE_RETRY_MAX_SECONDS,
@@ -653,14 +703,10 @@ class RuntimeState:
             name=f"kodelet-{live.agent_id}-{live.generation}",
         )
         live.runner_task = runner_task
+        owned_key = self.owned_run_key(live.store, live.run_id)
+        self.owned_runs[owned_key] = live
         key = self.live_run_key(live.store, live.agent_id)
         self.live_runs[key] = live
-
-        def remove_completed_run(_task: asyncio.Task[None]) -> None:
-            if self.live_runs.get(key) is live:
-                self.live_runs.pop(key, None)
-
-        runner_task.add_done_callback(remove_completed_run)
 
     @staticmethod
     async def fork_parent_context(parent_context: ToolContext, name: str) -> str:
@@ -788,6 +834,7 @@ class RuntimeState:
         # observe ``shutting_down`` and compensate, but drain again so shutdown
         # also owns any setup or worker that crossed a lifecycle boundary.
         await self._cancel_owned_tasks()
+        await self._await_cleanup_tasks()
         for store in list(self.stores.values()):
             if store.runtime_id == self.runtime_id:
                 with contextlib.suppress(Exception):
@@ -800,7 +847,7 @@ class RuntimeState:
         }
         tasks.update(
             live.runner_task
-            for live in list(self.live_runs.values())
+            for live in list(self.owned_runs.values())
             if live.store.runtime_id == self.runtime_id
             and live.runner_task is not None
             and live.runner_task is not current
@@ -809,6 +856,13 @@ class RuntimeState:
         for task in tasks:
             task.cancel()
         if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _await_cleanup_tasks(self) -> None:
+        while True:
+            tasks = [task for task in self.cleanup_tasks if not task.done()]
+            if not tasks:
+                return
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
@@ -821,7 +875,6 @@ __all__ = [
     "DATABASE_FILENAME",
     "HEARTBEAT_INTERVAL_SECONDS",
     "HEARTBEAT_RETRY_MAX_SECONDS",
-    "LEGACY_DATA_DIRECTORY",
     "MIN_HEARTBEAT_INTERVAL_SECONDS",
     "RECURSION_GUARD_ENV",
     "STEERING_POLL_SECONDS",

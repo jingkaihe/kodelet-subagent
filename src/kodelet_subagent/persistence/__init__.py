@@ -1,9 +1,4 @@
-from .database import (
-    SQLITE_BUSY_TIMEOUT_MS,
-    copy_legacy_database,
-    find_legacy_database,
-    migrate_database,
-)
+from .database import SQLITE_BUSY_TIMEOUT_MS, migrate_database
 from .models import (
     ACTIVE_AGENT_STATUSES,
     ACTIVE_RUN_STATUSES,
@@ -74,8 +69,6 @@ __all__ = [
     "StoreError",
     "UnsupportedDatabaseError",
     "WorkerTerminalStatus",
-    "copy_legacy_database",
-    "find_legacy_database",
     "migrate_database",
     "validate_agent_name",
 ]
