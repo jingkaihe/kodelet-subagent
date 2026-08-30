@@ -23,6 +23,14 @@ Run the package's installer directly with `uvx`:
 uvx kodelet-subagent install
 ```
 
+Or install directly from GitHub:
+
+```bash
+uvx --from git+https://github.com/jingkaihe/kodelet-subagent kodelet-subagent install
+```
+
+The GitHub form pins the resolved commit in the generated extension wrapper.
+
 This installs the extension wrapper at:
 
 ```text
