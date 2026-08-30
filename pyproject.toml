@@ -1,0 +1,52 @@
+[project]
+name = "kodelet-subagent"
+version = "0.4.0"
+description = "Durable background-agent extension for Kodelet"
+readme = "README.md"
+authors = [
+    { name = "Jingkai He", email = "jingkai@hey.com" }
+]
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["kodelet", "extension", "agents", "background-tasks"]
+dependencies = [
+    "alembic>=1.16,<2",
+    "kodelet-sdk>=0.1.21,<0.2",
+]
+
+[project.urls]
+Repository = "https://github.com/jingkaihe/kodelet-subagent"
+Issues = "https://github.com/jingkaihe/kodelet-subagent/issues"
+
+[project.scripts]
+kodelet-extension-subagent = "kodelet_subagent.__main__:main"
+kodelet-subagent = "kodelet_subagent.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.18,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.14",
+    "ty>=0.0.1a21",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "C90", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ty.environment]
+python-version = "3.11"
+root = ["src", "tests"]

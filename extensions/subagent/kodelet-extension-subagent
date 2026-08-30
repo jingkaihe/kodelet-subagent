@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+set -eu
+
+extension_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repository_root=$(CDPATH= cd -- "$extension_dir/../.." && pwd)
+
+if [ -f "$repository_root/pyproject.toml" ] && [ -d "$repository_root/src/kodelet_subagent" ]; then
+  exec uv run --project "$repository_root" --locked kodelet-extension-subagent "$@"
+fi
+
+exec uvx --from 'kodelet-subagent==0.4.0' kodelet-extension-subagent "$@"
