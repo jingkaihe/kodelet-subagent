@@ -640,6 +640,7 @@ class SubagentApplication:
         try:
             owner_id = owner_conversation_id(ctx)
             store = await self.runtime.store_for_context(ctx)
+            agent = await store.get(owner_id, agent_id)
             result = await store.enqueue_steering(
                 owner_id,
                 agent_id,
@@ -652,10 +653,15 @@ class SubagentApplication:
         queued = " behind pending steering" if result["alreadyPending"] else ""
         return {
             "content": (
-                f"Queued steering for agent {agent_id}{queued}.\n\n"
+                f"Queued steering for agent {agent.name!r} ({agent.id}){queued}.\n\n"
                 f"Steering message queued for delivery:\n{message}"
             ),
-            "data": {"agent_id": agent_id, "message": message, **result},
+            "data": {
+                "agent_id": agent.id,
+                "name": agent.name,
+                "message": message,
+                **result,
+            },
         }
 
     async def cancel_agent(

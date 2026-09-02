@@ -1132,6 +1132,8 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
             "Steering message queued for delivery:\nfocus on the parser",
             result["content"],
         )
+        self.assertIn("steerable-worker", result["content"])
+        self.assertEqual(result["data"]["name"], "steerable-worker")
         self.assertEqual(result["data"]["message"], "focus on the parser")
         self.assertTrue(result["data"]["accepted"])
         self.assertEqual(
