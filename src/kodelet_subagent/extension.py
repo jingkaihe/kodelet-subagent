@@ -613,16 +613,17 @@ class SubagentApplication:
             return agent_not_found(agent_id)
         except Exception as exc:
             return tool_error(f"followup_agent failed: {exc}")
+        conversation_detail = (
+            f" in conversation {live.conversation_id}."
+            if live.conversation_id is not None
+            else " with fresh context."
+        )
         return {
             "content": (
                 f"Started follow-up run {live.run_id} for agent "
-                f"{claim.agent.name!r} ({live.agent_id})"
-                + (
-                    f" in conversation {live.conversation_id}."
-                    if live.conversation_id is not None
-                    else " with fresh context."
-                )
-                + " Call wait_agent before relying on its result."
+                f"{claim.agent.name!r} ({live.agent_id}){conversation_detail}\n\n"
+                f"Follow-up task sent:\n{task}\n\n"
+                "Call wait_agent before relying on its result."
             ),
             "data": public_snapshot(claim.agent),
         }
@@ -635,13 +636,14 @@ class SubagentApplication:
         if is_agent_child(ctx):
             return child_tool_error()
         agent_id = input.agent_id.strip()
+        message = input.message.strip()
         try:
             owner_id = owner_conversation_id(ctx)
             store = await self.runtime.store_for_context(ctx)
             result = await store.enqueue_steering(
                 owner_id,
                 agent_id,
-                input.message,
+                message,
             )
         except AgentNotFoundError:
             return agent_not_found(agent_id)
@@ -649,8 +651,11 @@ class SubagentApplication:
             return tool_error(f"steer_agent failed: {exc}")
         queued = " behind pending steering" if result["alreadyPending"] else ""
         return {
-            "content": f"Queued steering for agent {agent_id}{queued}.",
-            "data": {"agent_id": agent_id, **result},
+            "content": (
+                f"Queued steering for agent {agent_id}{queued}.\n\n"
+                f"Steering message queued for delivery:\n{message}"
+            ),
+            "data": {"agent_id": agent_id, "message": message, **result},
         }
 
     async def cancel_agent(

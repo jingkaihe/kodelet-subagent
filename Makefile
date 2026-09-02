@@ -1,10 +1,18 @@
-VERSION := $(shell uv run --no-sync -- python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+VERSION := $(shell uv version --short)
 TAG := v$(VERSION)
 
-.PHONY: sync lint format-check typecheck test build check version tag release clean
+.PHONY: sync sync-version version-check lint format-check typecheck test build check version tag release clean
 
 sync:
 	uv sync --locked
+
+sync-version:
+	uv lock
+	uv run --no-sync -- python -c 'from kodelet_subagent.install import sync_repository_extension_wrapper; sync_repository_extension_wrapper(version="$(VERSION)")'
+
+version-check:
+	uv lock --check
+	@uv run --no-sync -- python -c 'import sys; from pathlib import Path; from kodelet_subagent.install import repository_extension_wrapper; path = Path("extensions/subagent/kodelet-extension-subagent"); sys.exit("repository extension wrapper is stale; run `make sync-version`") if path.read_text(encoding="utf-8") != repository_extension_wrapper("$(VERSION)") else None'
 
 lint:
 	uv run -- ruff check
@@ -21,7 +29,7 @@ test:
 build:
 	uv build
 
-check: lint format-check typecheck test build
+check: version-check lint format-check typecheck test build
 
 version:
 	@printf '%s\n' '$(VERSION)'

@@ -52,4 +52,4 @@ When adding a migration, test a fresh database, upgrade from the previous revisi
 
 ## Releases
 
-The package version in `pyproject.toml`, extension metadata, and the pinned version in `extensions/subagent/kodelet-extension-subagent` must match. The release workflow publishes tags named `v<version>` to PyPI using trusted publishing.
+`pyproject.toml` is the sole hand-maintained package version source. After changing it, run `make sync-version` to refresh `uv.lock` and the generated pin in `extensions/subagent/kodelet-extension-subagent`; source checkouts read the version from `pyproject.toml`, while built packages read their distribution metadata. The release workflow publishes tags named `v<version>` to PyPI using trusted publishing.

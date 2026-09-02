@@ -28,9 +28,8 @@ jobs:
       - run: uv run -- python --version
       - name: Verify release version
         run: |
-          PACKAGE_VERSION="$(uv run --no-sync -- python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          PACKAGE_VERSION="$(make --no-print-directory version)"
           test "${GITHUB_REF_NAME}" = "v${PACKAGE_VERSION}"
-          grep -F "kodelet-subagent==${PACKAGE_VERSION}" extensions/subagent/kodelet-extension-subagent
       - run: make check
       - uses: pypa/gh-action-pypi-publish@release/v1
       - uses: softprops/action-gh-release@v2

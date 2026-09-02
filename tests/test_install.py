@@ -12,6 +12,8 @@ from kodelet_subagent.install import (
     install_plugin,
     installed_package_source,
     plugin_executable,
+    repository_extension_wrapper,
+    sync_repository_extension_wrapper,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,7 +38,21 @@ def test_repository_plugin_wrapper_pins_the_package_version() -> None:
     wrapper = ROOT / "extensions" / "subagent" / "kodelet-extension-subagent"
 
     assert wrapper.stat().st_mode & 0o111
-    assert f"kodelet-subagent=={__version__}" in wrapper.read_text(encoding="utf-8")
+    assert wrapper.read_text(encoding="utf-8") == repository_extension_wrapper()
+
+
+def test_project_metadata_is_the_authoritative_version_source() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+
+    assert project["version"] == __version__
+
+
+def test_sync_repository_extension_wrapper_uses_runtime_version(tmp_path: Path) -> None:
+    wrapper = sync_repository_extension_wrapper(root=tmp_path)
+
+    assert wrapper == tmp_path / "extensions" / "subagent" / "kodelet-extension-subagent"
+    assert wrapper.read_text(encoding="utf-8") == repository_extension_wrapper()
+    assert wrapper.stat().st_mode & 0o111
 
 
 def test_git_install_pins_the_resolved_commit_in_the_extension_wrapper() -> None:

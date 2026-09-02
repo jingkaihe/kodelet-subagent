@@ -673,6 +673,8 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
             ),
             context,
         )
+        self.assertIn("Follow-up task sent:\nsecond pass", followup["content"])
+        self.assertEqual(followup["data"]["task"], "second pass")
         second_run_id = followup["data"]["run_id"]
         await asyncio.wait_for(FakeClient.run_started.wait(), timeout=1)
         self.assertEqual(
@@ -1105,6 +1107,37 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(carried.message, "message carried into the follow-up run")
         self.assertTrue(await store.acknowledge_steering(followup.lease, carried.id))
         self.assertEqual(self.steering_rows(store.path), [])
+
+    async def test_steer_result_exposes_the_normalized_queued_message(self) -> None:
+        context = self.context()
+        store = await self.runtime.store_for_context(context)
+        claim = await store.create(
+            context.conversation_id,
+            "steerable-worker",
+            "long task",
+            context.cwd,
+            "fresh",
+        )
+        await store.mark_running(claim.lease, "child-steerable")
+
+        result = await self.app.steer_agent(
+            extension.SteerAgentInput(
+                agent_id=claim.agent.id,
+                message="  focus on the parser  ",
+            ),
+            context,
+        )
+
+        self.assertIn(
+            "Steering message queued for delivery:\nfocus on the parser",
+            result["content"],
+        )
+        self.assertEqual(result["data"]["message"], "focus on the parser")
+        self.assertTrue(result["data"]["accepted"])
+        self.assertEqual(
+            self.steering_rows(store.path),
+            [(claim.lease.run_id, claim.lease.generation, "focus on the parser")],
+        )
 
     async def test_cancel_persists_cleanup(self) -> None:
         context = self.context()
