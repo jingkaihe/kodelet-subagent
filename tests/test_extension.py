@@ -539,7 +539,18 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(completed["content"], "result for inspect authentication")
         self.assertEqual(completed["data"]["status"], "completed")
+        self.assertEqual(
+            completed["data"]["presentation"],
+            {
+                "summary": "Wait for authentication-inspector",
+            },
+        )
         self.assertIn("1 completed", context.ui.text(WIDGET_ID))
+
+        async def forked_lease_closed() -> bool:
+            return forked_lease.close_calls == 1
+
+        await wait_until(forked_lease_closed)
         self.assertEqual(forked_lease.close_calls, 1)
 
         FakeClient.block_runs = False
@@ -564,7 +575,13 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("resume", fresh_client.create_session_calls[0])
         self.assertEqual(fresh_result["data"]["context_mode"], "fresh")
         self.assertEqual(len(context.background_leases), 2)
-        self.assertEqual(context.background_leases[1].close_calls, 1)
+        fresh_lease = context.background_leases[1]
+
+        async def fresh_lease_closed() -> bool:
+            return fresh_lease.close_calls == 1
+
+        await wait_until(fresh_lease_closed)
+        self.assertEqual(fresh_lease.close_calls, 1)
 
         listed = await self.app.list_agents(extension.ListAgentsInput(), context)
         self.assertEqual(len(listed["data"]["agents"]), 2)
@@ -675,6 +692,14 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("Follow-up task sent:\nsecond pass", followup["content"])
         self.assertEqual(followup["data"]["task"], "second pass")
+        self.assertEqual(
+            followup["data"]["presentation"],
+            {
+                "summary": "Follow up iterative-reviewer",
+                "body": "second pass",
+                "format": "markdown",
+            },
+        )
         second_run_id = followup["data"]["run_id"]
         await asyncio.wait_for(FakeClient.run_started.wait(), timeout=1)
         self.assertEqual(
@@ -826,6 +851,7 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed["content"], "result for inspect progress")
         task_run = completed["data"]["taskRun"]
         self.assertEqual(task_run["kind"], "subagent")
+        self.assertEqual(task_run["title"], "Wait for progress-inspector")
         self.assertEqual(task_run["status"], "completed")
         tool_activity = next(
             activity for activity in task_run["activities"] if activity["id"] == "tool-1"
@@ -855,6 +881,7 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result["data"]["status"], "running")
+        self.assertEqual(result["data"]["taskRun"]["title"], "Wait for long-runner")
         self.assertEqual(result["data"]["taskRun"]["status"], "running")
         self.assertTrue(context.tool_updates)
         self.assertEqual(session.listeners.get("tool.call"), [])
@@ -1135,6 +1162,14 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("steerable-worker", result["content"])
         self.assertEqual(result["data"]["name"], "steerable-worker")
         self.assertEqual(result["data"]["message"], "focus on the parser")
+        self.assertEqual(
+            result["data"]["presentation"],
+            {
+                "summary": "Steer steerable-worker",
+                "body": "focus on the parser",
+                "format": "markdown",
+            },
+        )
         self.assertTrue(result["data"]["accepted"])
         self.assertEqual(
             self.steering_rows(store.path),

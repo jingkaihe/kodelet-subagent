@@ -134,15 +134,15 @@ wheels = [
 
 [[package]]
 name = "kodelet-sdk"
-version = "0.1.21"
+version = "0.1.22"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jinja2" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2b/5b/187d1962fd9151c847d38ead30c16f0edb73556bfab0b89df00fca798441/kodelet_sdk-0.1.21.tar.gz", hash = "sha256:e7a2988aeb95a5f5308596a24a19cc45d02192dc4f71fc59fdc5c4e6a8dd4387", size = 119161, upload-time = "2026-08-29T22:42:46.864Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/26/09/e65ebed6a8a8f6a1c05349eba8adb08e3ecf633585a4c5817a394a218b9f/kodelet_sdk-0.1.22.tar.gz", hash = "sha256:ee30b7438f17114576b00838b7e50174b23a7ef1f7193ef75d95e02685481957", size = 120086, upload-time = "2026-09-02T21:42:45.925Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5c/35/34d527d179c1cb5da0e7ff9ba53dbcdb8b2f4bc69960253d4e9f074f6f1d/kodelet_sdk-0.1.21-py3-none-any.whl", hash = "sha256:e4ed2e29a943311f03d0f6ea883c96e521a22b4d6012f43303dace4544f6ebb1", size = 63087, upload-time = "2026-08-29T22:42:45.524Z" },
+    { url = "https://files.pythonhosted.org/packages/69/d5/b003df9010c6167c6bf8ea7062487c4a52ea824d9353bbd3157edb966c4f/kodelet_sdk-0.1.22-py3-none-any.whl", hash = "sha256:cca6529640753a0be87d68a7417c91b875348f94716ee67645e89c64fecd1b1d", size = 63714, upload-time = "2026-09-02T21:42:44.386Z" },
 ]
 
 [[package]]
@@ -165,7 +165,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.16,<2" },
-    { name = "kodelet-sdk", specifier = ">=0.1.21,<0.2" },
+    { name = "kodelet-sdk", specifier = ">=0.1.22,<0.2" },
 ]
 
 [package.metadata.requires-dev]

@@ -261,6 +261,14 @@ def tool_error(message: str) -> ToolExecutionResult:
     return {"content": message, "error": message}
 
 
+def tool_presentation(summary: str, *, body: str | None = None) -> dict[str, str]:
+    presentation = {"summary": summary}
+    if body is not None:
+        presentation["body"] = body
+        presentation["format"] = "markdown"
+    return presentation
+
+
 def agent_not_found(agent_id: str) -> ToolExecutionResult:
     return tool_error(f"agent not found: {agent_id.strip()}")
 
@@ -437,6 +445,7 @@ class SubagentApplication:
             agent,
             include_result=agent.run.status == "completed",
         )
+        snapshot["presentation"] = tool_presentation(f"Wait for {agent.name}")
         if progress is not None:
             snapshot["taskRun"] = await self._finish_wait_progress(progress, agent)
         return self._wait_result(agent_id, agent, snapshot)
@@ -454,9 +463,9 @@ class SubagentApplication:
             kind="subagent",
             task=agent.run.task,
             cwd=agent.cwd,
-            running_title="Waiting for background agent",
-            completed_title="Finished waiting for background agent",
-            failed_title="Background agent failed",
+            running_title=f"Wait for {agent.name}",
+            completed_title=f"Wait for {agent.name}",
+            failed_title=f"Wait for {agent.name}",
             responding_detail="agent is responding",
         )
         await progress.start()
@@ -618,6 +627,11 @@ class SubagentApplication:
             if live.conversation_id is not None
             else " with fresh context."
         )
+        snapshot = public_snapshot(claim.agent)
+        snapshot["presentation"] = tool_presentation(
+            f"Follow up {claim.agent.name}",
+            body=task,
+        )
         return {
             "content": (
                 f"Started follow-up run {live.run_id} for agent "
@@ -625,7 +639,7 @@ class SubagentApplication:
                 f"Follow-up task sent:\n{task}\n\n"
                 "Call wait_agent before relying on its result."
             ),
-            "data": public_snapshot(claim.agent),
+            "data": snapshot,
         }
 
     async def steer_agent(
@@ -660,6 +674,10 @@ class SubagentApplication:
                 "agent_id": agent.id,
                 "name": agent.name,
                 "message": message,
+                "presentation": tool_presentation(
+                    f"Steer {agent.name}",
+                    body=message,
+                ),
                 **result,
             },
         }

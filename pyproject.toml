@@ -12,7 +12,7 @@ license-files = ["LICENSE"]
 keywords = ["kodelet", "extension", "agents", "background-tasks"]
 dependencies = [
     "alembic>=1.16,<2",
-    "kodelet-sdk>=0.1.21,<0.2",
+    "kodelet-sdk>=0.1.22,<0.2",
 ]
 
 [project.urls]
