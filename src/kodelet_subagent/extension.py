@@ -25,6 +25,7 @@ from kodelet_sdk import (
     TaskRunSnapshot,
     ToolContext,
     ToolExecutionResult,
+    ToolPresentation,
 )
 
 from . import __version__
@@ -103,6 +104,7 @@ WAIT_POLL_SECONDS = 0.1
 STEER_TOOL_TIMEOUT_SECONDS = 15
 CANCEL_TOOL_TIMEOUT_SECONDS = 15
 MAX_WAIT_MILLISECONDS = 5 * 60 * 1000
+PRESENTATION_TASK_PREVIEW_LENGTH = 160
 AGENT_TOOL_NAMES = (
     "spawn_agent",
     "wait_agent",
@@ -252,25 +254,44 @@ def owner_conversation_id(ctx: ToolContext) -> str:
     return conversation_id
 
 
-def child_tool_error() -> ToolExecutionResult:
+def child_tool_error(summary: str) -> ToolExecutionResult:
     message = "async agent tools are only available to the main agent"
-    return {"content": message, "error": message}
+    return tool_error(message, summary=summary)
 
 
-def tool_error(message: str) -> ToolExecutionResult:
-    return {"content": message, "error": message}
+def tool_error(message: str, *, summary: str) -> ToolExecutionResult:
+    return {
+        "content": message,
+        "error": message,
+        "data": {"presentation": tool_presentation(summary)},
+    }
 
 
-def tool_presentation(summary: str, *, body: str | None = None) -> dict[str, str]:
-    presentation = {"summary": summary}
+def tool_presentation(summary: str, *, body: str | None = None) -> ToolPresentation:
+    presentation: ToolPresentation = {"summary": summary}
     if body is not None:
         presentation["body"] = body
         presentation["format"] = "markdown"
     return presentation
 
 
-def agent_not_found(agent_id: str) -> ToolExecutionResult:
-    return tool_error(f"agent not found: {agent_id.strip()}")
+def agent_not_found(*, summary: str) -> ToolExecutionResult:
+    return tool_error("agent not found", summary=summary)
+
+
+def agent_list_presentation(agents: list[AgentRecord]) -> ToolPresentation:
+    if not agents:
+        return tool_presentation("List agents", body="No background agents.")
+
+    lines: list[str] = []
+    for agent in agents:
+        task = " ".join(agent.run.task.split())
+        if len(task) > PRESENTATION_TASK_PREVIEW_LENGTH:
+            task = f"{task[: PRESENTATION_TASK_PREVIEW_LENGTH - 3]}..."
+        lines.append(f"- **{agent.name}** — {agent.run.status}")
+        if task:
+            lines.append(f"  {task}")
+    return tool_presentation("List agents", body="\n".join(lines))
 
 
 class SubagentApplication:
@@ -362,15 +383,20 @@ class SubagentApplication:
         input: SpawnAgentInput,
         ctx: ToolContext,
     ) -> ToolExecutionResult:
+        summary = "Spawn agent"
         if is_agent_child(ctx):
-            return child_tool_error()
+            return child_tool_error(summary)
         try:
             name = validate_agent_name(input.name)
         except ValueError as exc:
-            return tool_error(str(exc))
+            return tool_error(str(exc), summary=summary)
+        summary = f"Spawn {name}"
         task = input.task.strip()
         if not task:
-            return tool_error("task is required and must be a non-empty string")
+            return tool_error(
+                "task is required and must be a non-empty string",
+                summary=summary,
+            )
         try:
             owner_id = owner_conversation_id(ctx)
             agent_cwd = resolve_agent_cwd(input.cwd, ctx.cwd)
@@ -387,6 +413,7 @@ class SubagentApplication:
                 store,
                 initial=True,
             )
+            summary = f"Spawn {claim.agent.name}"
             claim, live = await self.runtime.prepare_claim(
                 claim,
                 task,
@@ -396,20 +423,22 @@ class SubagentApplication:
             )
             await self.runtime.safe_sync_agent_widget(ctx.ui, store, owner_id)
         except Exception as exc:
-            return tool_error(f"spawn_agent failed: {exc}")
+            return tool_error(f"spawn_agent failed: {exc}", summary=summary)
 
         conversation_detail = (
             f" in conversation {live.conversation_id}"
             if live.conversation_id is not None
             else " with fresh context"
         )
+        snapshot = public_snapshot(claim.agent)
+        snapshot["presentation"] = tool_presentation(summary, body=task)
         return {
             "content": (
                 f"Spawned agent {claim.agent.name!r} ({live.agent_id})"
                 f"{conversation_detail}. Continue with independent work and call "
                 "wait_agent before relying on its result."
             ),
-            "data": public_snapshot(claim.agent),
+            "data": snapshot,
         }
 
     async def wait_agent(
@@ -417,13 +446,15 @@ class SubagentApplication:
         input: WaitAgentInput,
         ctx: ToolContext,
     ) -> ToolExecutionResult:
+        summary = "Wait for agent"
         if is_agent_child(ctx):
-            return child_tool_error()
+            return child_tool_error(summary)
         agent_id = input.agent_id.strip()
         try:
             owner_id = owner_conversation_id(ctx)
             store = await self.runtime.store_for_context(ctx)
             agent = await store.get(owner_id, agent_id)
+            summary = f"Wait for {agent.name}"
             progress: TaskProgress | None = None
             if agent.run.status in ACTIVE_RUN_STATUSES and input.timeout_ms > 0:
                 agent, progress = await self._wait_for_active_run(
@@ -434,21 +465,21 @@ class SubagentApplication:
                     input.timeout_ms,
                 )
         except AgentNotFoundError:
-            return agent_not_found(agent_id)
+            return agent_not_found(summary=summary)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            return tool_error(f"wait_agent failed: {exc}")
+            return tool_error(f"wait_agent failed: {exc}", summary=summary)
 
         await self.runtime.safe_sync_agent_widget(ctx.ui, store, owner_id)
         snapshot = public_snapshot(
             agent,
             include_result=agent.run.status == "completed",
         )
-        snapshot["presentation"] = tool_presentation(f"Wait for {agent.name}")
+        snapshot["presentation"] = tool_presentation(summary)
         if progress is not None:
             snapshot["taskRun"] = await self._finish_wait_progress(progress, agent)
-        return self._wait_result(agent_id, agent, snapshot)
+        return self._wait_result(agent, snapshot)
 
     async def _wait_for_active_run(
         self,
@@ -528,28 +559,27 @@ class SubagentApplication:
 
     @staticmethod
     def _wait_result(
-        agent_id: str,
         agent: AgentRecord,
         snapshot: dict[str, object],
     ) -> ToolExecutionResult:
         if agent.run.status in ACTIVE_RUN_STATUSES:
             return {
-                "content": f"Agent {agent_id} is still {agent.run.status}.",
+                "content": f"Agent {agent.name!r} is still {agent.run.status}.",
                 "data": snapshot,
             }
         if agent.run.status == "completed":
             return {"content": agent.run.result or "", "data": snapshot}
         if agent.run.status == "failed":
-            message = f"Agent {agent_id} failed: {agent.run.error or 'unknown error'}"
+            message = f"Agent {agent.name!r} failed: {agent.run.error or 'unknown error'}"
             return {"content": message, "error": message, "data": snapshot}
         if agent.run.status == "interrupted":
             message = (
-                f"Agent {agent_id} was interrupted: "
+                f"Agent {agent.name!r} was interrupted: "
                 f"{agent.run.error or 'worker stopped'}. Use followup_agent to resume it."
             )
             return {"content": message, "error": message, "data": snapshot}
         return {
-            "content": f"Agent {agent_id} was canceled.",
+            "content": f"Agent {agent.name!r} was canceled.",
             "data": snapshot,
         }
 
@@ -558,19 +588,23 @@ class SubagentApplication:
         _input: ListAgentsInput,
         ctx: ToolContext,
     ) -> ToolExecutionResult:
+        summary = "List agents"
         if is_agent_child(ctx):
-            return child_tool_error()
+            return child_tool_error(summary)
         try:
             owner_id = owner_conversation_id(ctx)
             store = await self.runtime.store_for_context(ctx)
             agents = await store.list(owner_id)
             await self.runtime.safe_sync_agent_widget(ctx.ui, store, owner_id)
         except Exception as exc:
-            return tool_error(f"list_agents failed: {exc}")
+            return tool_error(f"list_agents failed: {exc}", summary=summary)
         if not agents:
             return {
                 "content": "No background agents have been spawned by this conversation.",
-                "data": {"agents": []},
+                "data": {
+                    "agents": [],
+                    "presentation": agent_list_presentation(agents),
+                },
             }
         lines = [
             "Background agents:",
@@ -587,7 +621,10 @@ class SubagentApplication:
             )
         return {
             "content": "\n".join(lines),
-            "data": {"agents": [public_snapshot(agent) for agent in agents]},
+            "data": {
+                "agents": [public_snapshot(agent) for agent in agents],
+                "presentation": agent_list_presentation(agents),
+            },
         }
 
     async def followup_agent(
@@ -595,15 +632,21 @@ class SubagentApplication:
         input: FollowupAgentInput,
         ctx: ToolContext,
     ) -> ToolExecutionResult:
+        summary = "Follow up agent"
         if is_agent_child(ctx):
-            return child_tool_error()
+            return child_tool_error(summary)
         agent_id = input.agent_id.strip()
         task = input.task.strip()
         if not task:
-            return tool_error("task is required and must be a non-empty string")
+            return tool_error(
+                "task is required and must be a non-empty string",
+                summary=summary,
+            )
         try:
             owner_id = owner_conversation_id(ctx)
             store = await self.runtime.store_for_context(ctx)
+            agent = await store.get(owner_id, agent_id)
+            summary = f"Follow up {agent.name}"
             claim = await self.runtime.reserve_claim(
                 store.claim(owner_id, agent_id, task),
                 task,
@@ -619,9 +662,9 @@ class SubagentApplication:
             )
             await self.runtime.safe_sync_agent_widget(ctx.ui, store, owner_id)
         except AgentNotFoundError:
-            return agent_not_found(agent_id)
+            return agent_not_found(summary=summary)
         except Exception as exc:
-            return tool_error(f"followup_agent failed: {exc}")
+            return tool_error(f"followup_agent failed: {exc}", summary=summary)
         conversation_detail = (
             f" in conversation {live.conversation_id}."
             if live.conversation_id is not None
@@ -629,7 +672,7 @@ class SubagentApplication:
         )
         snapshot = public_snapshot(claim.agent)
         snapshot["presentation"] = tool_presentation(
-            f"Follow up {claim.agent.name}",
+            summary,
             body=task,
         )
         return {
@@ -647,23 +690,25 @@ class SubagentApplication:
         input: SteerAgentInput,
         ctx: ToolContext,
     ) -> ToolExecutionResult:
+        summary = "Steer agent"
         if is_agent_child(ctx):
-            return child_tool_error()
+            return child_tool_error(summary)
         agent_id = input.agent_id.strip()
         message = input.message.strip()
         try:
             owner_id = owner_conversation_id(ctx)
             store = await self.runtime.store_for_context(ctx)
             agent = await store.get(owner_id, agent_id)
+            summary = f"Steer {agent.name}"
             result = await store.enqueue_steering(
                 owner_id,
                 agent_id,
                 message,
             )
         except AgentNotFoundError:
-            return agent_not_found(agent_id)
+            return agent_not_found(summary=summary)
         except Exception as exc:
-            return tool_error(f"steer_agent failed: {exc}")
+            return tool_error(f"steer_agent failed: {exc}", summary=summary)
         queued = " behind pending steering" if result["alreadyPending"] else ""
         return {
             "content": (
@@ -675,7 +720,7 @@ class SubagentApplication:
                 "name": agent.name,
                 "message": message,
                 "presentation": tool_presentation(
-                    f"Steer {agent.name}",
+                    summary,
                     body=message,
                 ),
                 **result,
@@ -687,31 +732,42 @@ class SubagentApplication:
         input: CancelAgentInput,
         ctx: ToolContext,
     ) -> ToolExecutionResult:
+        summary = "Cancel agent"
         if is_agent_child(ctx):
-            return child_tool_error()
+            return child_tool_error(summary)
         agent_id = input.agent_id.strip()
         try:
             owner_id = owner_conversation_id(ctx)
             store = await self.runtime.store_for_context(ctx)
             agent = await store.cancel(owner_id, agent_id)
+            summary = f"Cancel {agent.name}"
             await self.runtime.safe_sync_agent_widget(ctx.ui, store, owner_id)
         except AgentNotFoundError:
-            return agent_not_found(agent_id)
+            return agent_not_found(summary=summary)
         except Exception as exc:
-            return tool_error(f"cancel_agent failed: {exc}")
+            return tool_error(f"cancel_agent failed: {exc}", summary=summary)
 
         cleanup_complete = await self.runtime.cancel_live_run(store, agent_id)
+        snapshot = public_snapshot(agent)
         if not cleanup_complete:
+            snapshot["presentation"] = tool_presentation(
+                summary,
+                body="Cancellation saved; local cleanup is still finishing.",
+            )
             return {
                 "content": (
-                    f"Cancellation persisted for agent {agent_id}; "
+                    f"Cancellation persisted for agent {agent.name!r}; "
                     "local cleanup is still finishing."
                 ),
-                "data": public_snapshot(agent),
+                "data": snapshot,
             }
+        snapshot["presentation"] = tool_presentation(
+            summary,
+            body="The agent is permanently canceled and cannot be resumed.",
+        )
         return {
-            "content": f"Canceled agent {agent_id}.",
-            "data": public_snapshot(agent),
+            "content": f"Canceled agent {agent.name!r}.",
+            "data": snapshot,
         }
 
 

@@ -452,6 +452,10 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
             child_context,
         )
         self.assertIn("only available to the main agent", nested["error"])
+        self.assertEqual(
+            nested["data"]["presentation"],
+            {"summary": "Spawn agent"},
+        )
         with mock.patch.dict(os.environ, {RECURSION_GUARD_ENV: "1"}):
             self.assertTrue(extension.is_agent_child(self.context()))
 
@@ -506,6 +510,14 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         forked_data = forked["data"]
         self.assertEqual(forked_data["name"], "authentication-inspector")
         self.assertIn("authentication-inspector", forked["content"])
+        self.assertEqual(
+            forked_data["presentation"],
+            {
+                "summary": "Spawn authentication-inspector",
+                "body": "inspect authentication",
+                "format": "markdown",
+            },
+        )
         self.assertEqual(len(context.background_leases), 1)
         forked_lease = context.background_leases[0]
         self.assertIn(forked_data["agent_id"], forked_lease.description or "")
@@ -589,12 +601,29 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("independent-reviewer", listed["content"])
         self.assertIn(running.conversation_id, listed["content"])
         self.assertIn(fresh_result["data"]["conversation_id"], listed["content"])
+        list_presentation = listed["data"]["presentation"]
+        self.assertEqual(list_presentation["summary"], "List agents")
+        self.assertEqual(list_presentation["format"], "markdown")
+        self.assertIn("**authentication-inspector** — completed", list_presentation["body"])
+        self.assertIn("inspect authentication", list_presentation["body"])
+        self.assertIn("**independent-reviewer** — completed", list_presentation["body"])
+        self.assertIn("independent review", list_presentation["body"])
+        self.assertNotIn(forked_data["agent_id"], list_presentation["body"])
+        self.assertNotIn(running.conversation_id, list_presentation["body"])
         other_context = self.context("owner-2")
         other_list = await self.app.list_agents(
             extension.ListAgentsInput(),
             other_context,
         )
         self.assertEqual(other_list["data"]["agents"], [])
+        self.assertEqual(
+            other_list["data"]["presentation"],
+            {
+                "summary": "List agents",
+                "body": "No background agents.",
+                "format": "markdown",
+            },
+        )
         hidden = await self.app.wait_agent(
             extension.WaitAgentInput(
                 agent_id=forked_data["agent_id"],
@@ -603,6 +632,10 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
             other_context,
         )
         self.assertIn("agent not found", hidden["error"])
+        self.assertEqual(
+            hidden["data"]["presentation"],
+            {"summary": "Wait for agent"},
+        )
 
         restored_context = self.context()
         await self.app.restore_agent_widget(cast(Any, {}), restored_context)
@@ -713,6 +746,10 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(current["data"]["run_id"], second_run_id)
         self.assertEqual(current["data"]["status"], "running")
+        self.assertEqual(
+            current["data"]["presentation"],
+            {"summary": "Wait for iterative-reviewer"},
+        )
         FakeClient.run_release.set()
         second = await self.app.wait_agent(
             extension.WaitAgentInput(
@@ -1202,6 +1239,15 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
                 context,
             )
         self.assertIn("cleanup is still finishing", canceled["content"])
+        self.assertEqual(
+            canceled["data"]["presentation"],
+            {
+                "summary": "Cancel cancelable-worker",
+                "body": "Cancellation saved; local cleanup is still finishing.",
+                "format": "markdown",
+            },
+        )
+        self.assertNotIn(agent_id, canceled["data"]["presentation"]["body"])
         persisted = await store.get(context.conversation_id, agent_id)
         self.assertEqual(persisted.status, "canceled")
         self.assertEqual(persisted.run.status, "canceled")
@@ -1224,6 +1270,20 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.close_calls, 1)
         self.assertEqual(background_lease.close_calls, 1)
         self.assertEqual(self.runtime.owned_runs, {})
+
+        canceled_again = await self.app.cancel_agent(
+            extension.CancelAgentInput(agent_id=agent_id),
+            context,
+        )
+        self.assertEqual(
+            canceled_again["data"]["presentation"],
+            {
+                "summary": "Cancel cancelable-worker",
+                "body": "The agent is permanently canceled and cannot be resumed.",
+                "format": "markdown",
+            },
+        )
+        self.assertNotIn(agent_id, canceled_again["content"])
 
     async def test_completed_run_remains_owned_until_background_lease_release(
         self,
