@@ -34,6 +34,7 @@ from .persistence import (
     AGENT_NAME_MAX_LENGTH,
     AGENT_NAME_PATTERN,
     MAX_STEERING_MESSAGE_LENGTH,
+    AgentConflictError,
     AgentNotFoundError,
     AgentRecord,
     AgentStore,
@@ -45,55 +46,48 @@ from .ui import public_snapshot
 
 SPAWN_AGENT_DESCRIPTION = textwrap.dedent(
     """
-    Start a named independent Kodelet agent in the background and return
-    immediately. The name must contain one to three lowercase kebab-case words and
-    be unique among agents owned by this conversation.
-    By default, the child inherits the caller's live conversation context in an
-    isolated fork. Set context_mode to fresh to start with no parent conversation
-    memory. Agent identity, run history, and recovery state are persisted by this
-    extension. Use followup_agent to wake an idle, failed, or interrupted agent.
+    Start a named Kodelet agent in the background and return immediately. Names
+    must contain one to three lowercase kebab-case words and be unique. By default,
+    the agent inherits the current conversation; set context_mode to fresh to start
+    without it. Use followup_agent to wake an idle, failed, interrupted, or canceled
+    agent.
     """
 ).strip()
 
 WAIT_AGENT_DESCRIPTION = textwrap.dedent(
     """
-    Wait for the current run of a persisted background agent owned by this
-    conversation. Returns the final response when the run finishes, or its current
-    status when the timeout expires. Use a zero timeout to check the current status
-    without waiting.
+    Wait for a background agent's current run. Returns its final response when the
+    run finishes or its current status when the timeout expires. Set timeout_ms to
+    0 to check without waiting.
     """
 ).strip()
 
 LIST_AGENTS_DESCRIPTION = textwrap.dedent(
     """
-    List persisted background agents owned by this conversation, including their
-    current agent state, latest run state, and child conversation IDs.
+    List background agents with their current status and latest run.
     """
 ).strip()
 
 FOLLOWUP_AGENT_DESCRIPTION = textwrap.dedent(
     """
-    Wake an idle, failed, or interrupted background agent with a new task. The new
-    run resumes its persisted child conversation, or recreates the requested
-    fork/fresh context if interruption happened before attachment, and returns
-    immediately. Only the main agent that owns the original agent may call it.
+    Give an idle, failed, interrupted, or canceled background agent a new task and
+    return immediately. The agent continues its existing conversation when
+    available.
     """
 ).strip()
 
 STEER_AGENT_DESCRIPTION = textwrap.dedent(
     """
-    Queue guidance for an owned background agent that is currently running. The
-    extension persists the message until ACP reports that it was injected into
-    the live child session. If the turn closes first, the pending message is
-    carried into the next follow-up run. Injected but unconsumed guidance remains
-    on the child conversation and may also be applied during a later follow-up.
+    Send guidance to a background agent that is currently running. The guidance is
+    delivered before its next model response, or kept for a later follow-up if the
+    current run ends first.
     """
 ).strip()
 
 CANCEL_AGENT_DESCRIPTION = textwrap.dedent(
     """
-    Permanently cancel an owned background agent and fence its active worker. A
-    canceled agent cannot be resumed with followup_agent.
+    Cancel a background agent. An active agent remains in the canceling state until
+    it fully stops. Once canceled, it can be resumed with followup_agent.
     """
 ).strip()
 
@@ -143,9 +137,9 @@ class SpawnAgentInput(BaseModel):
     context_mode: SpawnContextMode = Field(
         default="fork",
         description=(
-            "How to initialize the child conversation. 'fork' copies the main "
-            "agent's live conversation into an isolated child; 'fresh' starts "
-            "with no parent conversation memory. Defaults to 'fork'."
+            "How to initialize the agent's conversation. 'fork' copies the current "
+            "conversation into an isolated child; 'fresh' starts without parent "
+            "conversation context. Defaults to 'fork'."
         ),
     )
 
@@ -173,18 +167,18 @@ class ListAgentsInput(BaseModel):
 class FollowupAgentInput(BaseModel):
     agent_id: str = Field(
         min_length=1,
-        description="The persisted agent ID to wake or resume.",
+        description="The ID of an idle, failed, interrupted, or canceled agent to resume.",
     )
     task: str = Field(
         min_length=1,
-        description="The new task to run in the agent's persisted child conversation.",
+        description="The new task to run in the agent's existing conversation.",
     )
 
 
 class SteerAgentInput(BaseModel):
     agent_id: str = Field(
         min_length=1,
-        description="The running agent ID to steer.",
+        description="The ID of the currently running agent to guide.",
     )
     message: str = Field(
         min_length=1,
@@ -288,7 +282,8 @@ def agent_list_presentation(agents: list[AgentRecord]) -> ToolPresentation:
         task = " ".join(agent.run.task.split())
         if len(task) > PRESENTATION_TASK_PREVIEW_LENGTH:
             task = f"{task[: PRESENTATION_TASK_PREVIEW_LENGTH - 3]}..."
-        lines.append(f"- **{agent.name}** — {agent.run.status}")
+        status = "canceling" if agent.status == "canceling" else agent.run.status
+        lines.append(f"- **{agent.name}** — {status}")
         if task:
             lines.append(f"  {task}")
     return tool_presentation("List agents", body="\n".join(lines))
@@ -578,8 +573,16 @@ class SubagentApplication:
                 f"{agent.run.error or 'worker stopped'}. Use followup_agent to resume it."
             )
             return {"content": message, "error": message, "data": snapshot}
+        if agent.status == "canceling":
+            return {
+                "content": (
+                    f"Agent {agent.name!r} is still canceling. "
+                    "Retry followup_agent after cancellation finishes."
+                ),
+                "data": snapshot,
+            }
         return {
-            "content": f"Agent {agent.name!r} was canceled.",
+            "content": (f"Agent {agent.name!r} was canceled. Use followup_agent to resume it."),
             "data": snapshot,
         }
 
@@ -647,6 +650,10 @@ class SubagentApplication:
             store = await self.runtime.store_for_context(ctx)
             agent = await store.get(owner_id, agent_id)
             summary = f"Follow up {agent.name}"
+            if agent.status == "canceling":
+                raise AgentConflictError(
+                    "agent cancellation is still in progress; retry followup_agent shortly"
+                )
             claim = await self.runtime.reserve_claim(
                 store.claim(owner_id, agent_id, task),
                 task,
@@ -747,26 +754,64 @@ class SubagentApplication:
         except Exception as exc:
             return tool_error(f"cancel_agent failed: {exc}", summary=summary)
 
-        cleanup_complete = await self.runtime.cancel_live_run(store, agent_id)
+        canceled_run_id = agent.run.id
+        cleanup_complete = True
+        if agent.status == "canceling":
+            cleanup_complete = await self.runtime.cancel_live_run(
+                store,
+                agent.id,
+                canceled_run_id,
+            )
+        agent = await store.get(owner_id, agent.id)
         snapshot = public_snapshot(agent)
-        if not cleanup_complete:
+        if agent.run.id != canceled_run_id:
             snapshot["presentation"] = tool_presentation(
                 summary,
-                body="Cancellation saved; local cleanup is still finishing.",
+                body="Cancellation was recorded; the agent has since changed generation.",
+            )
+            return {
+                "content": (
+                    f"Recorded cancellation for agent {agent.name!r}; "
+                    "the agent has since changed generation."
+                ),
+                "data": snapshot,
+            }
+        if agent.status == "canceling":
+            snapshot["presentation"] = tool_presentation(
+                summary,
+                body=(
+                    "Cancellation saved; worker cleanup is still finishing. "
+                    "Retry followup_agent after cleanup completes."
+                ),
             )
             return {
                 "content": (
                     f"Cancellation persisted for agent {agent.name!r}; "
-                    "local cleanup is still finishing."
+                    "worker cleanup is still finishing. Retry followup_agent after "
+                    "cleanup completes."
+                ),
+                "data": snapshot,
+            }
+        if not cleanup_complete:
+            snapshot["presentation"] = tool_presentation(
+                summary,
+                body=(
+                    "Canceled and resumable. Remaining local resource cleanup is still finishing."
+                ),
+            )
+            return {
+                "content": (
+                    f"Canceled agent {agent.name!r}; it can now be resumed with "
+                    "followup_agent while remaining local resource cleanup finishes."
                 ),
                 "data": snapshot,
             }
         snapshot["presentation"] = tool_presentation(
             summary,
-            body="The agent is permanently canceled and cannot be resumed.",
+            body="Canceled. Use followup_agent to resume this agent later.",
         )
         return {
-            "content": f"Canceled agent {agent.name!r}.",
+            "content": (f"Canceled agent {agent.name!r}. Use followup_agent to resume it later."),
             "data": snapshot,
         }
 

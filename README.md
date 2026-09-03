@@ -7,9 +7,9 @@ The extension provides six tools:
 - `spawn_agent` starts a named background agent from a fork of the current conversation or from fresh context.
 - `wait_agent` waits for a specific run while forwarding live child-tool progress when available.
 - `list_agents` reports persisted agents owned by the current conversation.
-- `followup_agent` resumes a completed, failed, or interrupted agent.
+- `followup_agent` resumes a completed, failed, interrupted, or canceled agent.
 - `steer_agent` queues guidance for a running agent.
-- `cancel_agent` persists cancellation and fences the active worker.
+- `cancel_agent` persists a durable `canceling` state, fences the active setup or worker, and preserves the agent for a later follow-up once cancellation finishes.
 
 Agent identity, run history, leases, and steering messages are stored in SQLite. The extension initializes and upgrades its database automatically before serving tools.
 

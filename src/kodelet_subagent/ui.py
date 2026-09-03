@@ -56,6 +56,7 @@ def agent_widget_line(agent: AgentRecord) -> UIFrameLine:
     icon_by_status = {
         "starting": "◌",
         "running": "●",
+        "canceling": "×",
         "completed": "✓",
         "failed": "!",
         "interrupted": "!",
@@ -64,7 +65,7 @@ def agent_widget_line(agent: AgentRecord) -> UIFrameLine:
     name = agent.name
     if len(name) > 88:
         name = f"{name[:85]}..."
-    status = agent.run.status
+    status = "canceling" if agent.status == "canceling" else agent.run.status
     icon_style: UIStyle = {"bold": True} if status in ACTIVE_RUN_STATUSES else {"dim": True}
     status_style: UIStyle = {"bold": True} if status in {"failed", "interrupted"} else {"dim": True}
     spans: list[UIStyledSpan] = [
@@ -80,10 +81,15 @@ def agent_widget_lines(agents: list[AgentRecord]) -> list[UIFrameLine]:
     """Render the complete persistent background-agent widget."""
 
     active = sum(agent.run.status in ACTIVE_RUN_STATUSES for agent in agents)
+    canceling = sum(agent.status == "canceling" for agent in agents)
     completed = sum(agent.run.status == "completed" for agent in agents)
     attention = sum(agent.run.status in {"failed", "interrupted"} for agent in agents)
-    canceled = sum(agent.run.status == "canceled" for agent in agents)
+    canceled = sum(
+        agent.run.status == "canceled" and agent.status != "canceling" for agent in agents
+    )
     summary_parts = [f"{active} active", f"{completed} completed"]
+    if canceling:
+        summary_parts.append(f"{canceling} canceling")
     if attention:
         summary_parts.append(f"{attention} need attention")
     if canceled:

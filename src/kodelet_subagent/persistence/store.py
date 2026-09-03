@@ -120,6 +120,17 @@ class AgentStore:
             conversation_id,
         )
 
+    async def attach_canceling_conversation(
+        self,
+        lease: Lease,
+        conversation_id: str,
+    ) -> AgentRecord:
+        return await asyncio.to_thread(
+            self._attach_canceling_conversation_sync,
+            lease,
+            conversation_id,
+        )
+
     async def mark_running(
         self,
         lease: Lease,
@@ -154,11 +165,19 @@ class AgentStore:
         lease.expires_at = expires_at
         return expires_at
 
+    async def heartbeat_canceling(self, lease: Lease) -> float:
+        expires_at = await asyncio.to_thread(self._heartbeat_canceling_sync, lease)
+        lease.expires_at = expires_at
+        return expires_at
+
     async def abort(self, lease: Lease) -> bool:
         return await asyncio.to_thread(self._abort_sync, lease)
 
     async def cancel(self, owner_id: str, agent_id: str) -> AgentRecord:
         return await asyncio.to_thread(self._cancel_sync, owner_id, agent_id)
+
+    async def complete_cancel(self, lease: Lease) -> bool:
+        return await asyncio.to_thread(self._complete_cancel_sync, lease)
 
     async def enqueue_steering(
         self,
@@ -223,23 +242,34 @@ class AgentStore:
     ) -> int:
         rows = connection.execute(
             """
-            SELECT id, active_run_id, generation
+            SELECT id, active_run_id, generation, status
             FROM agents
-            WHERE status IN ('starting', 'running')
+            WHERE status IN ('starting', 'running', 'canceling')
               AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
             """,
             (now,),
         ).fetchall()
+        reconciled = 0
         for row in rows:
-            self._interrupt_row_tx(
-                connection,
-                str(row["id"]),
-                str(row["active_run_id"]),
-                int(row["generation"]),
-                "agent lease expired",
-                now,
-            )
-        return len(rows)
+            if str(row["status"]) == "canceling":
+                reconciled += self._complete_cancel_row_tx(
+                    connection,
+                    str(row["id"]),
+                    str(row["active_run_id"]),
+                    int(row["generation"]),
+                    now,
+                )
+            else:
+                self._interrupt_row_tx(
+                    connection,
+                    str(row["id"]),
+                    str(row["active_run_id"]),
+                    int(row["generation"]),
+                    "agent lease expired",
+                    now,
+                )
+                reconciled += 1
+        return reconciled
 
     def _interrupt_row_tx(
         self,
@@ -269,6 +299,31 @@ class AgentStore:
             (now, agent_id, run_id, generation),
         )
 
+    @staticmethod
+    def _complete_cancel_row_tx(
+        connection: sqlite3.Connection,
+        agent_id: str,
+        run_id: str,
+        generation: int,
+        now: float,
+    ) -> bool:
+        cursor = connection.execute(
+            """
+            UPDATE agents
+            SET status = 'canceled', lease_runtime_id = NULL,
+                lease_token = NULL, lease_expires_at = NULL, updated_at = ?
+            WHERE id = ? AND active_run_id = ? AND generation = ?
+              AND status = 'canceling'
+              AND EXISTS (
+                  SELECT 1 FROM runs
+                  WHERE runs.id = ? AND runs.agent_id = agents.id
+                    AND runs.generation = ? AND runs.status = 'canceled'
+              )
+            """,
+            (now, agent_id, run_id, generation, run_id, generation),
+        )
+        return cursor.rowcount == 1
+
     def _check_limits_tx(
         self,
         connection: sqlite3.Connection,
@@ -278,7 +333,8 @@ class AgentStore:
             connection.execute(
                 """
                 SELECT COUNT(*) FROM agents
-                WHERE owner_conversation_id = ? AND status IN ('starting', 'running')
+                WHERE owner_conversation_id = ?
+                  AND status IN ('starting', 'running', 'canceling')
                 """,
                 (owner_id,),
             ).fetchone()[0]
@@ -290,7 +346,10 @@ class AgentStore:
             )
         total_count = int(
             connection.execute(
-                "SELECT COUNT(*) FROM agents WHERE status IN ('starting', 'running')"
+                """
+                SELECT COUNT(*) FROM agents
+                WHERE status IN ('starting', 'running', 'canceling')
+                """
             ).fetchone()[0]
         )
         if total_count >= MAX_ACTIVE_AGENTS_TOTAL:
@@ -412,7 +471,7 @@ class AgentStore:
                 SELECT id FROM agents
                 WHERE owner_conversation_id = ?
                 ORDER BY
-                    CASE WHEN status IN ('starting', 'running') THEN 0 ELSE 1 END,
+                    CASE WHEN status IN ('starting', 'running', 'canceling') THEN 0 ELSE 1 END,
                     updated_at DESC
                 LIMIT ?
                 """,
@@ -455,7 +514,7 @@ class AgentStore:
                     lease_runtime_id = ?, lease_token = ?, lease_expires_at = ?,
                     updated_at = ?
                 WHERE id = ? AND owner_conversation_id = ? AND generation = ?
-                  AND status IN ('idle', 'failed', 'interrupted')
+                  AND status IN ('idle', 'failed', 'interrupted', 'canceled')
                 """,
                 (
                     run_id,
@@ -504,6 +563,36 @@ class AgentStore:
         with self._immediate_transaction() as connection:
             self._reconcile_expired_tx(connection, now)
             agent_row, _ = self._validate_active_lease_tx(connection, lease, now)
+            existing = agent_row["child_conversation_id"]
+            if existing is not None and str(existing) != conversation_id:
+                raise AgentConflictError("agent child conversation cannot change")
+            try:
+                connection.execute(
+                    """
+                    UPDATE agents
+                    SET child_conversation_id = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (conversation_id, now, lease.agent_id),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise AgentConflictError(
+                    "child conversation is already attached to another agent"
+                ) from exc
+            return self._fetch_agent_tx(connection, lease.agent_id)
+
+    def _attach_canceling_conversation_sync(
+        self,
+        lease: Lease,
+        conversation_id: str,
+    ) -> AgentRecord:
+        conversation_id = conversation_id.strip()
+        if not conversation_id:
+            raise ValueError("conversation id is required")
+        now = self.current_time()
+        with self._immediate_transaction() as connection:
+            self._reconcile_expired_tx(connection, now)
+            agent_row, _ = self._validate_canceling_lease_tx(connection, lease, now)
             existing = agent_row["child_conversation_id"]
             if existing is not None and str(existing) != conversation_id:
                 raise AgentConflictError("agent child conversation cannot change")
@@ -667,6 +756,22 @@ class AgentStore:
             )
         return expires_at
 
+    def _heartbeat_canceling_sync(self, lease: Lease) -> float:
+        now = self.current_time()
+        expires_at = now + LEASE_DURATION_SECONDS
+        with self._immediate_transaction() as connection:
+            self._reconcile_expired_tx(connection, now)
+            self._validate_canceling_lease_tx(connection, lease, now)
+            connection.execute(
+                """
+                UPDATE agents
+                SET lease_expires_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (expires_at, now, lease.agent_id),
+            )
+        return expires_at
+
     def _abort_sync(self, lease: Lease) -> bool:
         now = self.current_time()
         with self._immediate_transaction() as connection:
@@ -701,7 +806,7 @@ class AgentStore:
                 agent_id.strip(),
                 owner_id=owner_id.strip(),
             )
-            if current.status != "canceled":
+            if current.status not in {"canceling", "canceled"}:
                 self._delete_run_messages_tx(
                     connection,
                     current.id,
@@ -718,16 +823,64 @@ class AgentStore:
                         """,
                         (now, now, current.run.id),
                     )
-                connection.execute(
-                    """
-                    UPDATE agents
-                    SET status = 'canceled', lease_runtime_id = NULL,
-                        lease_token = NULL, lease_expires_at = NULL, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (now, current.id),
-                )
+                    connection.execute(
+                        """
+                        UPDATE agents
+                        SET status = 'canceling', lease_expires_at = ?, updated_at = ?
+                        WHERE id = ? AND active_run_id = ? AND generation = ?
+                          AND status IN ('starting', 'running')
+                        """,
+                        (
+                            now + LEASE_DURATION_SECONDS,
+                            now,
+                            current.id,
+                            current.run.id,
+                            current.run.generation,
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE agents
+                        SET status = 'canceled', lease_runtime_id = NULL,
+                            lease_token = NULL, lease_expires_at = NULL, updated_at = ?
+                        WHERE id = ? AND active_run_id = ? AND generation = ?
+                          AND status = ?
+                        """,
+                        (
+                            now,
+                            current.id,
+                            current.run.id,
+                            current.run.generation,
+                            current.status,
+                        ),
+                    )
             return self._fetch_agent_tx(connection, current.id)
+
+    def _complete_cancel_sync(self, lease: Lease) -> bool:
+        now = self.current_time()
+        with self._immediate_transaction() as connection:
+            self._reconcile_expired_tx(connection, now)
+            agent_row = self._agent_row_tx(connection, lease.agent_id)
+            run_row = self._run_row_tx(connection, lease.agent_id, lease.run_id)
+            self._validate_run_token(run_row, lease)
+            if (
+                str(agent_row["active_run_id"]) != lease.run_id
+                or int(agent_row["generation"]) != lease.generation
+            ):
+                return False
+            if str(agent_row["status"]) == "canceled":
+                return True
+            if str(agent_row["status"]) != "canceling":
+                return False
+            self._validate_canceling_lease_rows(agent_row, run_row, lease, now)
+            return self._complete_cancel_row_tx(
+                connection,
+                lease.agent_id,
+                lease.run_id,
+                lease.generation,
+                now,
+            )
 
     def _enqueue_steering_sync(
         self,
@@ -981,4 +1134,43 @@ class AgentStore:
         agent_row = self._agent_row_tx(connection, lease.agent_id)
         run_row = self._run_row_tx(connection, lease.agent_id, lease.run_id)
         self._validate_active_lease_rows(agent_row, run_row, lease, now)
+        return agent_row, run_row
+
+    def _validate_canceling_lease_rows(
+        self,
+        agent_row: sqlite3.Row,
+        run_row: sqlite3.Row,
+        lease: Lease,
+        now: float,
+    ) -> None:
+        self._validate_run_token(run_row, lease)
+        if lease.runtime_id != self.runtime_id:
+            raise LeaseLostError("async-agent worker runtime changed")
+        if str(agent_row["active_run_id"]) != lease.run_id:
+            raise LeaseLostError("async-agent active run changed")
+        if int(agent_row["generation"]) != lease.generation:
+            raise LeaseLostError("async-agent generation changed")
+        runtime_id = agent_row["lease_runtime_id"]
+        if runtime_id is None or str(runtime_id) != self.runtime_id:
+            raise LeaseLostError("async-agent worker runtime changed")
+        token = agent_row["lease_token"]
+        if token is None or not hmac.compare_digest(str(token), lease.token):
+            raise LeaseLostError("async-agent lease token changed")
+        expires_at = agent_row["lease_expires_at"]
+        if expires_at is None or float(expires_at) <= now:
+            raise LeaseLostError("async-agent lease expired")
+        if str(agent_row["status"]) != "canceling":
+            raise LeaseLostError(f"async-agent is {agent_row['status']}")
+        if str(run_row["status"]) != "canceled":
+            raise LeaseLostError(f"async-agent run is {run_row['status']}")
+
+    def _validate_canceling_lease_tx(
+        self,
+        connection: sqlite3.Connection,
+        lease: Lease,
+        now: float,
+    ) -> tuple[sqlite3.Row, sqlite3.Row]:
+        agent_row = self._agent_row_tx(connection, lease.agent_id)
+        run_row = self._run_row_tx(connection, lease.agent_id, lease.run_id)
+        self._validate_canceling_lease_rows(agent_row, run_row, lease, now)
         return agent_row, run_row

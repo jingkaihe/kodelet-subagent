@@ -9,6 +9,7 @@ SpawnContextMode = Literal["fork", "fresh"]
 AgentStatus = Literal[
     "starting",
     "running",
+    "canceling",
     "idle",
     "failed",
     "interrupted",
@@ -26,7 +27,7 @@ WorkerTerminalStatus = Literal["idle", "failed", "interrupted"]
 
 ACTIVE_AGENT_STATUSES = {"starting", "running"}
 ACTIVE_RUN_STATUSES = {"starting", "running"}
-CLAIMABLE_AGENT_STATUSES = {"idle", "failed", "interrupted"}
+CLAIMABLE_AGENT_STATUSES = {"idle", "failed", "interrupted", "canceled"}
 
 
 class EnqueueSteeringResult(TypedDict):
