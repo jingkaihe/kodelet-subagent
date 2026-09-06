@@ -39,7 +39,7 @@ This installs the extension wrapper at:
 ~/.kodelet/plugins/jingkaihe@kodelet-subagent/extensions/subagent/kodelet-extension-subagent
 ```
 
-Verify discovery after restarting Kodelet:
+Verify discovery in the selected runner's workspace:
 
 ```bash
 kodelet extension inspect jingkaihe@kodelet-subagent/subagent
