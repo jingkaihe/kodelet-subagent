@@ -13,6 +13,8 @@ The extension provides six tools:
 
 Agent identity, run history, leases, and steering messages are stored in SQLite. The extension initializes and upgrades its database automatically before serving tools.
 
+ACP subprocesses accept individual messages up to 64 MiB, including large saved-conversation replays and live tool results; this is not a limit on total conversation history. Oversized messages, read failures, or unexpected stdout closure stop the child and fail pending work instead of leaving an agent falsely running. Forced cleanup closes paused pipes and waits for the child to be reaped before releasing its background lease. A `running` status reflects the runtime's lease, not a guarantee of recent model or tool progress.
+
 ## Installation
 
 Requirements: Kodelet with extension background-task support, Python 3.11 or newer, and `uv`.

@@ -13,12 +13,12 @@ from typing import Any, Literal, NotRequired, Protocol, TypedDict, cast
 
 from kodelet_sdk import (
     BackgroundTaskLease,
-    Client,
     ConversationForkUnavailableError,
     EventContext,
     ToolContext,
 )
 
+from .acp import ACPClient
 from .persistence import (
     DATABASE_FILENAME,
     AgentConflictError,
@@ -92,7 +92,7 @@ def default_client_factory(
 ) -> AgentClient:
     """Construct the production Kodelet SDK client."""
 
-    return cast(AgentClient, Client(command=command, cwd=cwd, env=env))
+    return cast(AgentClient, ACPClient(command=command, cwd=cwd, env=env))
 
 
 @dataclass(slots=True)
