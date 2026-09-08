@@ -1,6 +1,6 @@
 [project]
 name = "kodelet-subagent"
-version = "0.4.2"
+version = "0.5.0"
 description = "Durable background-agent extension for Kodelet"
 readme = "README.md"
 authors = [
@@ -12,7 +12,7 @@ license-files = ["LICENSE"]
 keywords = ["kodelet", "extension", "agents", "background-tasks"]
 dependencies = [
     "alembic>=1.16,<2",
-    "kodelet-sdk>=0.1.22,<0.2",
+    "kodelet-sdk>=0.2.2,<0.3",
 ]
 
 [project.urls]

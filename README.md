@@ -13,11 +13,11 @@ The extension provides six tools:
 
 Agent identity, run history, leases, and steering messages are stored in SQLite. The extension initializes and upgrades its database automatically before serving tools.
 
-ACP subprocesses accept individual messages up to 64 MiB, including large saved-conversation replays and live tool results; this is not a limit on total conversation history. Oversized messages, read failures, or unexpected stdout closure stop the child and fail pending work instead of leaving an agent falsely running. Forced cleanup closes paused pipes and waits for the child to be reaped before releasing its background lease. A `running` status reflects the runtime's lease, not a guarantee of recent model or tool progress.
+Agents run through the daemon's scoped child API, with provider credentials and conversation history kept on the daemon. Forks, follow-ups, steering, and cancellation preserve child ownership and policy. Child directories must be the current runner workspace or a descendant. A `running` status reflects the runtime's lease, not a guarantee of recent model or tool progress.
 
 ## Installation
 
-Requirements: Kodelet with extension background-task support, Python 3.11 or newer, and `uv`.
+Requirements: Kodelet with scoped child fork/resume/steering support, `kodelet-sdk` 0.2.2 or newer, Python 3.11 or newer, and `uv`. Install on the runner host. Background runs are bounded to one hour; cancellation and disconnect can end them earlier. Legacy ACP-created agents remain listed, but cannot be resumed without daemon-validated delegation ownership; start a new named agent instead.
 
 Run the package's installer directly with `uvx`:
 

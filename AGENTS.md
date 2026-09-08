@@ -14,7 +14,7 @@ Key modules:
 - `persistence/` owns records, transactional state changes, and migrations.
 - `install.py` owns the idempotent global Kodelet extension-wrapper installer.
 
-Runtime ownership covers database reservation, background-lease/conversation setup, the live worker, and final client/background-lease cleanup. `live_runs` is only the current-generation lookup for an agent; `owned_runs` retains every generation by run ID until its finalizer completes. Shutdown must stop new launches, drain reservations, cancel and await all `owned_runs`, await runtime-owned finalizers, and only then reconcile remaining rows.
+Runtime ownership covers database reservation, background-lease/child admission, the live worker, and final child/background-lease cleanup. The first `ctx.children.start` must be awaited inside the originating tool handler to establish retained authority; workers only wait/read/steer already admitted children. `live_runs` is only the current-generation lookup for an agent; `owned_runs` retains every generation by run ID until its finalizer completes. Shutdown must stop new launches, drain reservations, cancel and await all `owned_runs`, await runtime-owned finalizers, and only then reconcile remaining rows.
 
 ## Development
 

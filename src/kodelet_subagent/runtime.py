@@ -6,19 +6,19 @@ import asyncio
 import contextlib
 import sqlite3
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, NotRequired, Protocol, TypedDict, cast
+from typing import Any
 
 from kodelet_sdk import (
     BackgroundTaskLease,
-    ConversationForkUnavailableError,
+    ChildExecution,
     EventContext,
     ToolContext,
 )
 
-from .acp import ACPClient
 from .persistence import (
     DATABASE_FILENAME,
     AgentConflictError,
@@ -36,6 +36,7 @@ from .ui import WIDGET_ID, agent_widget_lines
 AGENT_TIMEOUT_SECONDS = 60 * 60 - 10
 AGENT_START_TIMEOUT_SECONDS = 60
 CANCEL_CLEANUP_TIMEOUT_SECONDS = 10
+CHILD_CANCEL_TIMEOUT_SECONDS = 10
 HEARTBEAT_INTERVAL_SECONDS = 20.0
 MIN_HEARTBEAT_INTERVAL_SECONDS = 1.0
 HEARTBEAT_RETRY_MAX_SECONDS = 2.0
@@ -43,56 +44,12 @@ WORKER_UPDATE_RETRY_INITIAL_SECONDS = 0.1
 WORKER_UPDATE_RETRY_MAX_SECONDS = 1.0
 BACKGROUND_LEASE_RELEASE_RETRY_INITIAL_SECONDS = 0.1
 BACKGROUND_LEASE_RELEASE_RETRY_MAX_SECONDS = 2.0
-CLIENT_CLOSE_RETRY_INITIAL_SECONDS = 0.1
-CLIENT_CLOSE_RETRY_MAX_SECONDS = 2.0
+CHILD_CANCEL_RETRY_INITIAL_SECONDS = 0.1
+CHILD_CANCEL_RETRY_MAX_SECONDS = 2.0
 STEERING_POLL_SECONDS = 0.1
 STEERING_RETRY_SECONDS = 0.25
+CHILD_EVENT_HISTORY_LIMIT = 256
 RECURSION_GUARD_ENV = "KODELET_SUBAGENT_EXTENSION_CHILD"
-
-
-class SessionSteerResult(TypedDict):
-    outcome: Literal["injected", "startedNewTurn", "promptRequired", "failed"]
-    reason: NotRequired[str]
-
-
-class SteeringSession(Protocol):
-    @property
-    def id(self) -> str: ...
-
-    async def run_and_wait(self, task: str) -> Mapping[str, Any]: ...
-
-    async def steer(self, message: str) -> SessionSteerResult: ...
-
-    def on(self, event_name: str, listener: Callable[[Any], Any]) -> Any: ...
-
-    def off(self, event_name: str, listener: Callable[[Any], Any]) -> Any: ...
-
-
-class AgentClient(Protocol):
-    async def create_session(self, **kwargs: Any) -> SteeringSession: ...
-
-    async def close(self) -> None: ...
-
-
-class ClientFactory(Protocol):
-    def __call__(
-        self,
-        *,
-        command: str,
-        cwd: str,
-        env: Mapping[str, str],
-    ) -> AgentClient: ...
-
-
-def default_client_factory(
-    *,
-    command: str,
-    cwd: str,
-    env: Mapping[str, str],
-) -> AgentClient:
-    """Construct the production Kodelet SDK client."""
-
-    return cast(AgentClient, ACPClient(command=command, cwd=cwd, env=env))
 
 
 @dataclass(slots=True)
@@ -112,13 +69,34 @@ class LiveRun:
     setup_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     runner_task: asyncio.Task[None] | None = field(default=None, repr=False)
     cleanup_task: asyncio.Task[None] | None = field(default=None, repr=False)
-    client: AgentClient | None = field(default=None, repr=False)
-    session: SteeringSession | None = field(default=None, repr=False)
+    child: ChildExecution | None = field(default=None, repr=False)
+    child_done: bool = False
+    events: deque[dict[str, Any]] = field(
+        default_factory=lambda: deque(maxlen=CHILD_EVENT_HISTORY_LIMIT), repr=False
+    )
+    event_listeners: set[Callable[[dict[str, Any]], None]] = field(default_factory=set, repr=False)
     parent_canceled: bool = False
     heartbeat_error: str | None = None
     terminalizing: bool = False
     ui: Any | None = field(default=None, repr=False)
     background_lease: BackgroundTaskLease | None = field(default=None, repr=False)
+
+    def record_event(self, event: dict[str, Any]) -> None:
+        """Retain recent history and deliver every event to active waiters."""
+
+        event = dict(event)
+        self.events.append(event)
+        for listener in tuple(self.event_listeners):
+            # Presentation failures must not stop the background child.
+            with contextlib.suppress(Exception):
+                listener(event)
+
+    def subscribe_events(self, listener: Callable[[dict[str, Any]], None]) -> None:
+        """Replay retained history and subscribe without yielding between them."""
+
+        for event in self.events:
+            listener(event)
+        self.event_listeners.add(listener)
 
 
 class RuntimeState:
@@ -128,10 +106,8 @@ class RuntimeState:
         self,
         *,
         runtime_id: str | None = None,
-        client_factory: ClientFactory = default_client_factory,
     ) -> None:
         self.runtime_id = runtime_id or f"runtime_{uuid.uuid4().hex}"
-        self.client_factory = client_factory
         self.stores: dict[Path, AgentStore] = {}
         self.live_runs: dict[tuple[Path, str], LiveRun] = {}
         self.owned_runs: dict[tuple[Path, str], LiveRun] = {}
@@ -390,7 +366,7 @@ class RuntimeState:
 
     async def safe_attach_canceling_conversation(self, live: LiveRun) -> bool:
         conversation_id = live.conversation_id
-        if conversation_id is None or live.context_mode != "fork":
+        if conversation_id is None:
             return True
         retry_delay = min(
             WORKER_UPDATE_RETRY_INITIAL_SECONDS,
@@ -451,11 +427,17 @@ class RuntimeState:
                         )
                     )
 
-    async def heartbeat_canceling(self, live: LiveRun) -> None:
+    async def heartbeat_cleanup(self, live: LiveRun) -> None:
         interval = max(MIN_HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_INTERVAL_SECONDS)
         while True:
             try:
-                await live.store.heartbeat_canceling(live.lease)
+                try:
+                    await live.store.heartbeat(live.lease)
+                except LeaseLostError:
+                    # Cancellation can arrive after failure cleanup starts,
+                    # including from another extension process. Both updates
+                    # preserve the exact token/generation/runtime/expiry fence.
+                    await live.store.heartbeat_canceling(live.lease)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -512,19 +494,27 @@ class RuntimeState:
 
     @staticmethod
     async def _deliver_steering_message(
-        session: SteeringSession,
-        message: str,
-    ) -> None:
+        live: LiveRun,
+        child: ChildExecution,
+        message: SteeringMessage,
+    ) -> bool:
         while True:
             try:
-                result = await session.steer(message)
+                result = await child.steer(
+                    message.message,
+                    request_id=f"{live.agent_id}:steering:{message.id}",
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:
                 await asyncio.sleep(STEERING_RETRY_SECONDS)
                 continue
-            if result.get("outcome") in {"injected", "startedNewTurn"}:
-                return
+            if result.get("outcome") == "injected":
+                return True
+            if result.get("outcome") == "promptRequired":
+                # Keep the durable queue entry for the next follow-up; an exact
+                # completed run must never be turned into a new provider turn.
+                return False
             await asyncio.sleep(STEERING_RETRY_SECONDS)
 
     async def _acknowledge_steering_message(
@@ -550,50 +540,59 @@ class RuntimeState:
                     return False
                 await asyncio.sleep(STEERING_RETRY_SECONDS)
 
-    async def steering_pump(self, live: LiveRun, session: SteeringSession) -> None:
+    async def steering_pump(self, live: LiveRun, child: ChildExecution) -> None:
         while True:
             queued = await self._wait_for_steering_message(live)
             if queued is None:
                 return
-            await self._deliver_steering_message(session, queued.message)
+            if not await self._deliver_steering_message(live, child, queued):
+                return
             if not await self._acknowledge_steering_message(live, queued.id):
                 return
 
-    async def _create_agent_session(
+    async def _start_child(
         self,
         live: LiveRun,
-        client: AgentClient,
-    ) -> SteeringSession:
+        ctx: ToolContext,
+    ) -> Claim:
         conversation_id = live.conversation_id
         was_unattached = conversation_id is None
         options: dict[str, Any] = {
+            "profile": "subagent",
+            "message": live.task,
+            "request_id": live.run_id,
             "cwd": str(live.cwd),
-            "streaming": True,
+            "lease": live.background_lease,
         }
         if conversation_id is not None:
             options["resume"] = conversation_id
-        session = await asyncio.wait_for(
-            client.create_session(**options),
-            timeout=AGENT_START_TIMEOUT_SECONDS,
-        )
-        live.session = session
-        live.conversation_id = session.id
+        else:
+            options["context_mode"] = live.context_mode
+        try:
+            child = await asyncio.wait_for(
+                ctx.children.start(**options),
+                timeout=AGENT_START_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            raise TimeoutError("agent timed out while starting the delegated child") from None
+        live.child = child
+        live.conversation_id = child.conversation_id
         if was_unattached:
-            await live.store.attach_conversation(live.lease, session.id)
-        await live.store.mark_running(live.lease, session.id)
+            await live.store.attach_conversation(live.lease, child.conversation_id)
+        agent = await live.store.mark_running(live.lease, child.conversation_id)
         await self.safe_sync_agent_widget(
             live.ui,
             live.store,
             live.owner_conversation_id,
         )
-        return session
+        return Claim(agent=agent, lease=live.lease)
 
     async def _complete_agent_run(
         self,
         live: LiveRun,
         response: Mapping[str, Any],
     ) -> None:
-        content = response.get("content")
+        content = response.get("output")
         result = content.strip() if isinstance(content, str) else ""
         live.terminalizing = True
         if result:
@@ -609,10 +608,8 @@ class RuntimeState:
     def _agent_failure_message(phase: str, exc: Exception) -> str:
         if isinstance(exc, TimeoutError):
             if phase == "starting":
-                return "agent timed out while starting the kodelet session"
+                return "agent timed out while starting the delegated child"
             return "agent timed out while waiting for kodelet to finish"
-        if isinstance(exc, OSError):
-            return f"Failed to execute kodelet: {exc}"
         return f"agent failed: {exc}"
 
     async def run_agent_job(
@@ -620,81 +617,66 @@ class RuntimeState:
         live: LiveRun,
         heartbeat_task: asyncio.Task[None] | None = None,
     ) -> None:
-        client: AgentClient | None = None
         steering_task: asyncio.Task[None] | None = None
+        failure: tuple[bool, WorkerTerminalStatus, str] | None = None
         if heartbeat_task is None:
             heartbeat_task = self.start_agent_heartbeat(live)
-        heartbeat_stopped = False
 
-        async def stop_heartbeat() -> None:
-            nonlocal heartbeat_stopped
-            if heartbeat_stopped:
-                return
-            heartbeat_stopped = True
-            await self.stop_task(heartbeat_task)
-
-        phase = "starting"
         try:
             if live.heartbeat_error is not None:
                 raise RuntimeError(live.heartbeat_error)
-            client = self.client_factory(
-                command="kodelet",
-                cwd=str(live.cwd),
-                env={RECURSION_GUARD_ENV: "1"},
-            )
-            live.client = client
-            session = await self._create_agent_session(live, client)
-            phase = "running"
+            child = live.child
+            if child is None:
+                raise RuntimeError("child admission must complete before launching the worker")
             steering_task = asyncio.create_task(
-                self.steering_pump(live, session),
+                self.steering_pump(live, child),
                 name=f"kodelet-{live.agent_id}-steering",
             )
 
             response = await asyncio.wait_for(
-                session.run_and_wait(live.task),
+                child.wait(on_event=live.record_event),
                 timeout=AGENT_TIMEOUT_SECONDS,
             )
+            live.child_done = True
             await self.stop_task(steering_task)
             steering_task = None
             await self._complete_agent_run(live, response)
-            await stop_heartbeat()
         except asyncio.CancelledError:
             await self.stop_task(steering_task)
             if not live.parent_canceled:
                 live.terminalizing = True
-                await self.safe_worker_terminal(
-                    live,
+                failure = (
+                    False,
                     "interrupted",
-                    error=live.heartbeat_error
+                    live.heartbeat_error
                     or "agent interrupted because the extension session stopped",
                 )
-            await stop_heartbeat()
             raise
         except Exception as exc:
             await self.stop_task(steering_task)
             steering_task = None
             live.terminalizing = True
-            await self.safe_worker_terminal(
-                live,
+            failure = (
+                False,
                 "failed",
-                error=self._agent_failure_message(phase, exc),
+                self._agent_failure_message("running", exc),
             )
-            await stop_heartbeat()
         finally:
             cleanup_task = self._start_live_run_cleanup(
                 live,
-                client,
                 steering_task,
                 heartbeat_task,
+                failure=failure,
             )
             await self._await_live_run_cleanup(cleanup_task)
 
     def _start_live_run_cleanup(
         self,
         live: LiveRun,
-        client: AgentClient | None,
         steering_task: asyncio.Task[None] | None,
         heartbeat_task: asyncio.Task[None] | None,
+        *,
+        failure: tuple[bool, WorkerTerminalStatus, str] | None = None,
     ) -> asyncio.Task[None]:
         existing = live.cleanup_task
         if existing is not None:
@@ -702,9 +684,9 @@ class RuntimeState:
         cleanup_task = asyncio.create_task(
             self._cleanup_live_run(
                 live,
-                client,
                 steering_task,
                 heartbeat_task,
+                failure=failure,
             ),
             name=f"kodelet-{live.agent_id}-{live.generation}-cleanup",
         )
@@ -730,28 +712,36 @@ class RuntimeState:
     async def _cleanup_live_run(
         self,
         live: LiveRun,
-        client: AgentClient | None,
         steering_task: asyncio.Task[None] | None,
         heartbeat_task: asyncio.Task[None] | None,
+        *,
+        failure: tuple[bool, WorkerTerminalStatus, str] | None = None,
     ) -> None:
         try:
             await self.stop_task(steering_task)
             await self.stop_task(heartbeat_task)
-            child_closed = client is None
-            canceling_heartbeat = asyncio.create_task(
-                self.heartbeat_canceling(live),
-                name=f"kodelet-{live.agent_id}-{live.generation}-canceling-heartbeat",
+            cleanup_heartbeat = asyncio.create_task(
+                self.heartbeat_cleanup(live),
+                name=f"kodelet-{live.agent_id}-{live.generation}-cleanup-heartbeat",
             )
             try:
-                if client is not None:
-                    await self.close_agent_client(client)
-                    child_closed = True
-                live.client = None
-                live.session = None
-                if child_closed and await self.safe_attach_canceling_conversation(live):
+                if live.child is not None and not live.child_done:
+                    await self.cancel_child(live)
+                elif live.child is None:
+                    # A canceled start can have an unknown admitted identity.
+                    # Revoke and drain its capability before touching accounting.
+                    await self.close_background_lease(live)
+                live.child = None
+                if failure is not None and not live.parent_canceled:
+                    initial, status, error = failure
+                    if initial and live.conversation_id is None:
+                        await self.safe_worker_abort(live)
+                    else:
+                        await self.safe_worker_terminal(live, status, error=error)
+                if await self.safe_attach_canceling_conversation(live):
                     await self.safe_complete_cancel(live)
             finally:
-                await self.stop_task(canceling_heartbeat)
+                await self.stop_task(cleanup_heartbeat)
             await self.close_background_lease(live)
         finally:
             key = self.live_run_key(live.store, live.agent_id)
@@ -763,19 +753,31 @@ class RuntimeState:
             live.setup_task = None
             live.cleanup_task = None
 
-    @staticmethod
-    async def close_agent_client(client: AgentClient) -> None:
-        retry_delay = CLIENT_CLOSE_RETRY_INITIAL_SECONDS
-        while True:
-            try:
-                await client.close()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(CLIENT_CLOSE_RETRY_MAX_SECONDS, retry_delay * 2)
-                continue
-            return
+    async def cancel_child(self, live: LiveRun) -> None:
+        child = live.child
+        assert child is not None
+        retry_delay = CHILD_CANCEL_RETRY_INITIAL_SECONDS
+        try:
+            async with asyncio.timeout(CHILD_CANCEL_TIMEOUT_SECONDS):
+                while True:
+                    try:
+                        await child.cancel()
+                        # Only a terminal response, not cancellation submission,
+                        # proves this exact child has stopped.
+                        while not (await child.read())["done"]:  # noqa: ASYNC110 - remote status
+                            await asyncio.sleep(STEERING_POLL_SECONDS)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        await asyncio.sleep(retry_delay)
+                        retry_delay = min(CHILD_CANCEL_RETRY_MAX_SECONDS, retry_delay * 2)
+                        continue
+                    return
+        except TimeoutError:
+            # A lost result/grant need not strand local accounting indefinitely.
+            # This ACK revokes and drains every child on this run's exclusive
+            # lease. Transport failure keeps cleanup owned and canceling.
+            await self.close_background_lease(live)
 
     async def close_background_lease(self, live: LiveRun) -> None:
         lease = live.background_lease
@@ -818,16 +820,6 @@ class RuntimeState:
         self.owned_runs[self.owned_run_key(live.store, live.run_id)] = live
         self.live_runs[self.live_run_key(live.store, live.agent_id)] = live
 
-    @staticmethod
-    async def fork_parent_context(parent_context: ToolContext, name: str) -> str:
-        try:
-            return await parent_context.fork_conversation(name=name)
-        except ConversationForkUnavailableError as exc:
-            raise RuntimeError(
-                "context_mode='fork' requires live conversation forking; use "
-                "context_mode='fresh' to start without parent conversation memory"
-            ) from exc
-
     async def prepare_claim(
         self,
         claim: Claim,
@@ -851,15 +843,9 @@ class RuntimeState:
                 live.background_lease = await ctx.acquire_background_task(
                     f"subagent {claim.agent.name} ({live.agent_id}): {' '.join(task.split())[:160]}"
                 )
-                if live.conversation_id is None and live.context_mode == "fork":
-                    live.conversation_id = await self.fork_parent_context(ctx, claim.agent.name)
-                    if live.heartbeat_error is not None:
-                        raise RuntimeError(live.heartbeat_error)
-                    attached = await store.attach_conversation(
-                        live.lease,
-                        live.conversation_id,
-                    )
-                    claim = Claim(agent=attached, lease=claim.lease)
+                # Bind retained child authority while this tool invocation is
+                # still active. A background lease alone cannot submit a child.
+                claim = await self._start_child(live, ctx)
                 self.ensure_accepting_agents()
                 await store.heartbeat(live.lease)
                 self.launch_live_run(live, setup_heartbeat)
@@ -867,45 +853,27 @@ class RuntimeState:
                 return claim, live
             except asyncio.CancelledError:
                 live.terminalizing = True
-                try:
-                    if not live.parent_canceled:
-                        if initial and live.conversation_id is None:
-                            await self.safe_worker_abort(live)
-                        else:
-                            await self.safe_worker_terminal(
-                                live,
-                                "interrupted",
-                                error="agent setup was canceled before the worker started",
-                            )
-                finally:
-                    cleanup_task = self._start_live_run_cleanup(
-                        live,
-                        None,
-                        None,
-                        setup_heartbeat,
-                    )
-                    await self._await_live_run_cleanup(cleanup_task)
+                cleanup_task = self._start_live_run_cleanup(
+                    live,
+                    None,
+                    setup_heartbeat,
+                    failure=(
+                        initial,
+                        "interrupted",
+                        "agent setup was canceled before the worker started",
+                    ),
+                )
+                await self._await_live_run_cleanup(cleanup_task)
                 raise
-            except Exception:
+            except Exception as exc:
                 live.terminalizing = True
-                try:
-                    if not live.parent_canceled:
-                        if initial and live.conversation_id is None:
-                            await self.safe_worker_abort(live)
-                        else:
-                            await self.safe_worker_terminal(
-                                live,
-                                "failed",
-                                error="agent setup failed before the worker started",
-                            )
-                finally:
-                    cleanup_task = self._start_live_run_cleanup(
-                        live,
-                        None,
-                        None,
-                        setup_heartbeat,
-                    )
-                    await self._await_live_run_cleanup(cleanup_task)
+                cleanup_task = self._start_live_run_cleanup(
+                    live,
+                    None,
+                    setup_heartbeat,
+                    failure=(initial, "failed", self._agent_failure_message("starting", exc)),
+                )
+                await self._await_live_run_cleanup(cleanup_task)
                 raise
         finally:
             self.setup_tasks.discard(setup_task)
@@ -998,8 +966,8 @@ __all__ = [
     "BACKGROUND_LEASE_RELEASE_RETRY_INITIAL_SECONDS",
     "BACKGROUND_LEASE_RELEASE_RETRY_MAX_SECONDS",
     "CANCEL_CLEANUP_TIMEOUT_SECONDS",
-    "CLIENT_CLOSE_RETRY_INITIAL_SECONDS",
-    "CLIENT_CLOSE_RETRY_MAX_SECONDS",
+    "CHILD_CANCEL_RETRY_INITIAL_SECONDS",
+    "CHILD_CANCEL_RETRY_MAX_SECONDS",
     "DATABASE_FILENAME",
     "HEARTBEAT_INTERVAL_SECONDS",
     "HEARTBEAT_RETRY_MAX_SECONDS",
@@ -1009,9 +977,6 @@ __all__ = [
     "STEERING_RETRY_SECONDS",
     "WORKER_UPDATE_RETRY_INITIAL_SECONDS",
     "WORKER_UPDATE_RETRY_MAX_SECONDS",
-    "ClientFactory",
     "LiveRun",
     "RuntimeState",
-    "SteeringSession",
-    "default_client_factory",
 ]

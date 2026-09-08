@@ -16,6 +16,7 @@ from kodelet_sdk import (
     BaseModel,
     EventContext,
     EventResult,
+    ExecutionProfile,
     Extension,
     Field,
     SessionEndEvent,
@@ -42,7 +43,7 @@ from .persistence import (
     validate_agent_name,
 )
 from .runtime import RECURSION_GUARD_ENV, RuntimeState
-from .ui import public_snapshot
+from .ui import forward_child_progress, public_snapshot
 
 SPAWN_AGENT_DESCRIPTION = textwrap.dedent(
     """
@@ -226,14 +227,17 @@ def is_agent_child(ctx: ToolContext | EventContext) -> bool:
 
 
 def resolve_agent_cwd(raw_cwd: str | None, workspace_cwd: str) -> Path:
+    workspace = Path(workspace_cwd).resolve()
     if raw_cwd is None:
-        return Path(workspace_cwd).resolve()
+        return workspace
     if not raw_cwd.strip():
         raise ValueError("cwd must be a non-empty string when provided")
     candidate = Path(raw_cwd).expanduser()
     if not candidate.is_absolute():
         candidate = Path(workspace_cwd) / candidate
     resolved = candidate.resolve()
+    if not resolved.is_relative_to(workspace):
+        raise ValueError("agent cwd must be the current workspace or a descendant directory")
     if not resolved.exists():
         raise ValueError(f"cwd does not exist: {resolved}")
     if not resolved.is_dir():
@@ -295,6 +299,7 @@ class SubagentApplication:
     def __init__(self, runtime: RuntimeState | None = None) -> None:
         self.runtime = runtime or RuntimeState()
         self.extension = SubagentExtension(self.runtime)
+        self.extension.register_profile(ExecutionProfile(name="subagent"))
         self._register_handlers()
 
     def _register_handlers(self) -> None:
@@ -494,7 +499,6 @@ class SubagentApplication:
             failed_title=f"Wait for {agent.name}",
             responding_detail="agent is responding",
         )
-        await progress.start()
         try:
             agent = await self._poll_agent_run(
                 progress,
@@ -522,20 +526,34 @@ class SubagentApplication:
         timeout_ms: int,
     ) -> AgentRecord:
         selected_run_id = agent.run.id
+        owned_key = self.runtime.owned_run_key(store, selected_run_id)
+        # Keep this generation's events even if cleanup or a follow-up removes
+        # its runtime lookup while the wait is publishing or polling.
+        live = self.runtime.owned_runs.get(owned_key)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_ms / 1000
-        attached = False
-        while agent.run.status in ACTIVE_RUN_STATUSES:
-            if not attached:
-                live = self.runtime.get_live_run(store, agent.id)
-                if live is not None and live.run_id == selected_run_id and live.session is not None:
-                    progress.attach(live.session)
-                    attached = True
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                break
-            await asyncio.sleep(min(WAIT_POLL_SECONDS, remaining))
-            agent = await store.get(owner_id, agent.id, selected_run_id)
+        active_calls: set[str] = set()
+
+        def on_event(event: dict[str, Any]) -> None:
+            forward_child_progress(progress, event, agent.cwd, active_calls)
+
+        try:
+            if live is not None:
+                live.subscribe_events(on_event)
+            await progress.start()
+            while agent.run.status in ACTIVE_RUN_STATUSES:
+                if live is None:
+                    live = self.runtime.owned_runs.get(owned_key)
+                    if live is not None:
+                        live.subscribe_events(on_event)
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(WAIT_POLL_SECONDS, remaining))
+                agent = await store.get(owner_id, agent.id, selected_run_id)
+        finally:
+            if live is not None:
+                live.event_listeners.discard(on_event)
         return agent
 
     @staticmethod
@@ -650,6 +668,7 @@ class SubagentApplication:
             store = await self.runtime.store_for_context(ctx)
             agent = await store.get(owner_id, agent_id)
             summary = f"Follow up {agent.name}"
+            resolve_agent_cwd(agent.cwd, ctx.cwd)
             if agent.status == "canceling":
                 raise AgentConflictError(
                     "agent cancellation is still in progress; retry followup_agent shortly"

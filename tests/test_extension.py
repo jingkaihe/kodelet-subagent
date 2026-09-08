@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sqlite3
 import tempfile
@@ -13,6 +14,8 @@ from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 from unittest import mock
 
+from kodelet_sdk import ChildClient, TaskProgress, TaskProgressContext
+
 import kodelet_subagent.extension as extension
 import kodelet_subagent.runtime as runtime_module
 from kodelet_subagent.persistence import (
@@ -24,8 +27,8 @@ from kodelet_subagent.persistence import (
     Claim,
     LeaseLostError,
 )
-from kodelet_subagent.runtime import RuntimeState, SessionSteerResult
-from kodelet_subagent.ui import WIDGET_ID
+from kodelet_subagent.runtime import RuntimeState
+from kodelet_subagent.ui import WIDGET_ID, forward_child_progress
 
 RECURSION_GUARD_ENV = "KODELET_SUBAGENT_EXTENSION_CHILD"
 
@@ -78,6 +81,7 @@ class FakeBackgroundTaskLease:
         block_close: bool = False,
     ) -> None:
         self.description = description
+        self.id = "lease-test"
         self.failures_remaining = failures_remaining
         self.block_close = block_close
         self.close_calls = 0
@@ -123,6 +127,7 @@ class FakeContext:
         self.background_acquire_release = asyncio.Event()
         self.background_leases: list[FakeBackgroundTaskLease] = []
         self.tool_updates: list[tuple[str, dict[str, Any] | None]] = []
+        self.children = FakeChildren(self)
 
     async def update(
         self,
@@ -143,6 +148,7 @@ class FakeContext:
             self.background_release_failures,
             block_close=self.block_background_release,
         )
+        lease.id = f"lease-{len(self.background_leases) + 1}"
         self.background_leases.append(lease)
         return lease
 
@@ -158,8 +164,14 @@ class FakeSession:
     def __init__(self, client: FakeClient, session_id: str) -> None:
         self.client = client
         self.id = session_id
+        self.conversation_id = session_id
+        self.run_id = f"run-{session_id}-{len(FakeClient.instances)}"
+        self.done = False
+        self.cancelled = False
+        self.on_event: Callable[[dict[str, Any]], Any] | None = None
         self.run_calls: list[str] = []
         self.steer_calls: list[str] = []
+        self.steer_request_ids: list[str] = []
         self.close_calls = 0
         self.run_started = asyncio.Event()
         self.steer_received = asyncio.Event()
@@ -177,7 +189,9 @@ class FakeSession:
         for listener in list(self.listeners.get(event_name, [])):
             listener(event)
 
-    async def run_and_wait(self, task: str) -> dict[str, str]:
+    async def wait(self, *, on_event: Callable[[dict[str, Any]], Any]) -> dict[str, Any]:
+        task = str(self.client.create_session_calls[0]["message"])
+        self.on_event = on_event
         self.run_calls.append(task)
         self.run_started.set()
         type(self.client).run_started.set()
@@ -186,10 +200,13 @@ class FakeSession:
         failure = type(self.client).run_failure
         if failure is not None:
             raise failure
-        return {"content": f"result for {task}"}
+        self.done = True
+        self.client.closed = True
+        return {"output": f"result for {task}", "done": True}
 
-    async def steer(self, message: str) -> SessionSteerResult:
+    async def steer(self, message: str, *, request_id: str) -> dict[str, str]:
         self.steer_calls.append(message)
+        self.steer_request_ids.append(request_id)
         self.steer_received.set()
         outcome = (
             type(self.client).steer_outcomes.pop(0)
@@ -198,13 +215,42 @@ class FakeSession:
             if type(self.client).accept_steering
             else "failed"
         )
-        result: SessionSteerResult = {"outcome": cast(Any, outcome)}
+        result = {"outcome": outcome}
         if outcome == "promptRequired":
             result["reason"] = "noRunningTurn"
         return result
 
     async def close(self) -> None:
         self.close_calls += 1
+
+    async def cancel(self) -> None:
+        await self.client.close()
+        self.cancelled = True
+        self.done = True
+
+    async def read(self) -> dict[str, Any]:
+        return {"done": self.done}
+
+
+class FakeChildren:
+    """Scoped child boundary; existing lifecycle fixtures control each admission."""
+
+    def __init__(self, context: FakeContext) -> None:
+        self.context = context
+        self.start_calls: list[dict[str, Any]] = []
+
+    async def start(self, **options: Any) -> FakeSession:
+        self.start_calls.append(options)
+        if options.get("context_mode") == "fork":
+            name = str(options["lease"].description).split()[1]
+            conversation_id = await self.context.fork_conversation(name)
+        else:
+            conversation_id = options.get("resume")
+        client = FakeClient(command="unused", cwd=self.context.cwd, env={})
+        child = await client.create_session(**options)
+        if conversation_id is not None:
+            child.id = child.conversation_id = conversation_id
+        return child
 
 
 class FakeClient:
@@ -298,6 +344,60 @@ async def wait_until(
         await asyncio.sleep(0.01)
 
 
+class ScopedChildHost:
+    """Exercise the real SDK while controlling the daemon's exact child state."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any], bool]] = []
+        self.executions: dict[str, dict[str, Any]] = {}
+        self.reject_start: str | None = None
+        self.block_start = False
+        self.start_entered = asyncio.Event()
+        self.start_release = asyncio.Event()
+        self.steer_outcome = "injected"
+        self.cancel_done = True
+        self.reject_reads = False
+
+    async def request(self, method: str, params: Any = None) -> Any:
+        return await self.call(method, params, False)
+
+    async def request_persistent(self, method: str, params: Any = None) -> Any:
+        return await self.call(method, params, True)
+
+    async def call(self, method: str, params: dict[str, Any], persistent: bool) -> Any:
+        self.calls.append((method, dict(params), persistent))
+        if method == "kodelet.child.start":
+            self.start_entered.set()
+            if self.reject_start:
+                raise RuntimeError(self.reject_start)
+            run_id = f"host-run-{len(self.executions) + 1}"
+            result = {
+                "conversationId": params.get("resume") or f"conversation-{run_id}",
+                "runId": run_id,
+                "done": False,
+                "output": f"result for {params['message']}",
+            }
+            self.executions[run_id] = result
+            if self.block_start:
+                await self.start_release.wait()
+            return dict(result)
+        result = self.executions[params["childRunId"]]
+        assert result["conversationId"] == params["childId"]
+        if method == "kodelet.child.cancel":
+            result["done"] = self.cancel_done
+            return None
+        if method == "kodelet.child.steer":
+            return (
+                {"outcome": "injected"}
+                if self.steer_outcome == "injected"
+                else {"outcome": "promptRequired", "reason": "noRunningTurn"}
+            )
+        assert method == "kodelet.child.read"
+        if self.reject_reads:
+            raise RuntimeError("transport unavailable")
+        return dict(result)
+
+
 class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._temp = tempfile.TemporaryDirectory()
@@ -313,7 +413,7 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         )
         self.environment_patch.start()
         FakeClient.reset()
-        self.runtime = RuntimeState(client_factory=FakeClient)
+        self.runtime = RuntimeState()
         self.app = extension.SubagentApplication(self.runtime)
         self.ext = self.app.extension
 
@@ -397,7 +497,7 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         return [(str(row[0]), int(row[1]), str(row[2])) for row in rows]
 
     async def test_application_instances_own_isolated_runtime_state(self) -> None:
-        other_runtime = RuntimeState(client_factory=FakeClient)
+        other_runtime = RuntimeState()
         other_application = extension.SubagentApplication(other_runtime)
 
         self.assertIs(self.app.runtime, self.runtime)
@@ -448,9 +548,7 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(unavailable["tools"], [])
 
         with mock.patch.dict(os.environ, {RECURSION_GUARD_ENV: "1"}):
-            child_application = extension.SubagentApplication(
-                RuntimeState(client_factory=FakeClient)
-            )
+            child_application = extension.SubagentApplication(RuntimeState())
         child_initialized = child_application.extension.initialize(params)
         self.assertEqual(child_initialized["tools"], [])
 
@@ -550,9 +648,12 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.fork_names, ["authentication-inspector"])
         self.assertIn(running.conversation_id, forked["content"])
         self.assertEqual(
-            FakeClient.instances[0].create_session_calls[0]["resume"],
-            running.conversation_id,
+            context.children.start_calls[0]["context_mode"],
+            "fork",
         )
+        self.assertEqual(context.children.start_calls[0]["request_id"], forked_data["run_id"])
+        self.assertIs(context.children.start_calls[0]["lease"], forked_lease)
+        self.assertEqual(context.children.start_calls[0]["profile"], "subagent")
         self.assertIn("1 active", context.ui.text(WIDGET_ID))
         self.assertIn("authentication-inspector", context.ui.text(WIDGET_ID))
 
@@ -803,6 +904,18 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
                 return bool(context.tool_updates)
 
             await wait_until(wait_started)
+            first_session = FakeClient.instances[0].sessions[0]
+            assert first_session.on_event is not None
+            first_session.on_event(
+                {
+                    "sequence": 1,
+                    "kind": "tool-result",
+                    "toolCallId": "first-call",
+                    "toolName": "bash",
+                    "success": False,
+                    "error": "first pass failed check",
+                }
+            )
             FakeClient.run_release.set()
             await self.wait_for_status(
                 store,
@@ -821,11 +934,27 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
                 context,
             )
             await asyncio.wait_for(FakeClient.run_started.wait(), timeout=1)
+            second_session = FakeClient.instances[-1].sessions[0]
+            assert second_session.on_event is not None
+            second_session.on_event(
+                {
+                    "sequence": 1,
+                    "kind": "tool-result",
+                    "toolCallId": "second-call",
+                    "toolName": "file_read",
+                    "success": True,
+                }
+            )
             first = await waiting
 
         self.assertEqual(first["content"], "result for first pass")
         self.assertEqual(first["data"]["run_id"], first_run_id)
         self.assertNotEqual(followup["data"]["run_id"], first_run_id)
+        self.assertEqual(
+            [activity["id"] for activity in first["data"]["taskRun"]["activities"]],
+            ["first-call"],
+        )
+        self.assertEqual(first["data"]["taskRun"]["counts"]["failed"], 1)
 
         FakeClient.run_release.set()
         second = await self.app.wait_agent(
@@ -856,47 +985,78 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        async def progress_attached() -> bool:
-            return bool(session.listeners.get("tool.call"))
-
-        await wait_until(progress_attached)
-        session.emit(
-            "tool.call",
+        assert session.on_event is not None
+        for event in [
             {
-                "data": {
-                    "toolCallId": "tool-1",
-                    "toolName": "bash",
-                    "input": {"command": "go test ./..."},
-                }
+                "sequence": 1,
+                "kind": "tool-use",
+                "toolCallId": "bash-call",
+                "toolName": "bash",
+                "input": json.dumps({"command": "uv run pytest", "description": "Run tests"}),
             },
-        )
-        session.emit(
-            "tool.update",
-            {"data": {"toolCallId": "tool-1", "result": "tests running"}},
-        )
-        session.emit(
-            "tool.result",
             {
-                "data": {
-                    "toolCallId": "tool-1",
-                    "status": "completed",
-                    "result": "ok",
-                }
+                "sequence": 2,
+                "kind": "tool-use",
+                "toolCallId": "search-call",
+                "toolName": "grep_tool",
+                "input": json.dumps({"pattern": "progress", "path": f"{context.cwd}/src"}),
             },
-        )
+            {
+                "sequence": 3,
+                "kind": "tool-update",
+                "toolCallId": "bash-call",
+                "toolOutput": "collecting tests\n3 tests collected",
+            },
+        ]:
+            session.on_event(event)
 
         async def tool_activity_published() -> bool:
             for _content, data in context.tool_updates:
                 task_run = (data or {}).get("taskRun")
                 if not isinstance(task_run, dict):
                     continue
-                if any(
-                    activity.get("id") == "tool-1" for activity in task_run.get("activities", [])
+                activities = {activity["id"]: activity for activity in task_run["activities"]}
+                if (
+                    task_run["counts"]["running"] == 2
+                    and activities.get("bash-call", {}).get("preview") == "3 tests collected"
                 ):
                     return True
             return False
 
         await wait_until(tool_activity_published)
+        for event in [
+            {
+                "sequence": 4,
+                "kind": "tool-result",
+                "toolCallId": "bash-call",
+                "toolName": "bash",
+                "success": False,
+                "toolOutput": "test output",
+                "error": "test assertion failed",
+            },
+            {
+                "sequence": 5,
+                "kind": "tool-result",
+                "toolCallId": "search-call",
+                "toolName": "grep_tool",
+                "success": True,
+                "toolOutput": "src/ui.py:18:progress",
+            },
+            {"sequence": 6, "kind": "text-delta", "text": "Here is the summary"},
+        ]:
+            session.on_event(event)
+        # An active wait must see outcomes even when a burst evicts them from
+        # replay history before the next database poll.
+        for sequence in range(7, 7 + runtime_module.CHILD_EVENT_HISTORY_LIMIT):
+            session.on_event({"sequence": sequence, "kind": "text-delta", "text": "summary"})
+
+        async def responding_published() -> bool:
+            return any(
+                (data or {}).get("taskRun", {}).get("phase") == "responding"
+                for _content, data in context.tool_updates
+            )
+
+        await wait_until(responding_published)
         FakeClient.run_release.set()
         completed = await waiting
 
@@ -905,12 +1065,92 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task_run["kind"], "subagent")
         self.assertEqual(task_run["title"], "Wait for progress-inspector")
         self.assertEqual(task_run["status"], "completed")
-        tool_activity = next(
-            activity for activity in task_run["activities"] if activity["id"] == "tool-1"
+        activities = {activity["id"]: activity for activity in task_run["activities"]}
+        self.assertEqual(activities["bash-call"]["kind"], "bash")
+        self.assertEqual(activities["bash-call"]["label"], "Bash: Run tests")
+        self.assertEqual(activities["bash-call"]["detail"], "run tests")
+        self.assertEqual(activities["bash-call"]["status"], "failed")
+        self.assertEqual(activities["bash-call"]["preview"], "test assertion failed")
+        self.assertEqual(activities["search-call"]["kind"], "grep_tool")
+        self.assertEqual(activities["search-call"]["label"], 'Search "progress" in src')
+        self.assertEqual(activities["search-call"]["detail"], "searching src")
+        self.assertEqual(activities["search-call"]["status"], "succeeded")
+        self.assertNotIn("preview", activities["search-call"])
+        self.assertEqual(task_run["counts"], {"succeeded": 1, "failed": 1, "running": 0})
+
+    async def test_child_progress_handles_bounded_previews_and_missing_starts(self) -> None:
+        progress = TaskProgress(
+            cast(TaskProgressContext, self.context()),
+            kind="subagent",
+            task="check child events",
+            cwd=str(self.cwd),
+            running_title="Working",
+            completed_title="Done",
+            failed_title="Failed",
+            responding_detail="agent is responding",
         )
-        self.assertEqual(tool_activity["kind"], "bash")
-        self.assertEqual(tool_activity["status"], "succeeded")
-        self.assertEqual(session.listeners.get("tool.call"), [])
+        active_calls: set[str] = set()
+        await progress.start()
+        try:
+            for index, tool_input in enumerate(['{"command": "truncated', '"string"', "null"]):
+                with self.subTest(tool_input=tool_input):
+                    call_id = f"call-{index}"
+                    forward_child_progress(
+                        progress,
+                        {
+                            "kind": "tool-use",
+                            "toolCallId": call_id,
+                            "toolName": "bash",
+                            "input": tool_input,
+                        },
+                        str(self.cwd),
+                        active_calls,
+                    )
+                    activity = progress.snapshot()["activities"][-1]
+                    self.assertEqual(activity["label"], "bash")
+                    self.assertEqual(activity["detail"], "running bash")
+                    self.assertIn(call_id, active_calls)
+                    forward_child_progress(
+                        progress,
+                        {"kind": "tool-result", "toolCallId": call_id, "success": True},
+                        str(self.cwd),
+                        active_calls,
+                    )
+                    self.assertNotIn(call_id, active_calls)
+
+            forward_child_progress(
+                progress,
+                {
+                    "kind": "tool-result",
+                    "toolCallId": "missing-start",
+                    "toolName": "file_read",
+                    "success": False,
+                    "toolOutput": "file not found",
+                },
+                str(self.cwd),
+                active_calls,
+            )
+            activity = progress.snapshot()["activities"][-1]
+            self.assertEqual(activity["label"], "file_read")
+            self.assertEqual(activity["status"], "failed")
+            self.assertEqual(activity["preview"], "file not found")
+            self.assertEqual(active_calls, set())
+            before = progress.snapshot()
+            for event in [
+                {"kind": "tool-use", "input": "{}"},
+                {"kind": "tool-update", "toolCallId": "missing-update", "toolOutput": "ignored"},
+                {"kind": "tool-result", "success": True},
+                {"kind": "thinking"},
+                {"kind": "result", "text": "done"},
+            ]:
+                forward_child_progress(progress, event, str(self.cwd), active_calls)
+            self.assertEqual(progress.snapshot()["activities"], before["activities"])
+            self.assertEqual(progress.snapshot()["phase"], "working")
+            forward_child_progress(progress, {"kind": "text"}, str(self.cwd), active_calls)
+            self.assertEqual(progress.snapshot()["phase"], "responding")
+            self.assertEqual(progress.snapshot()["detail"], "agent is responding")
+        finally:
+            await progress.finish(success=True)
 
     async def test_wait_timeout_returns_running_progress_and_detaches(self) -> None:
         context = self.context()
@@ -927,6 +1167,16 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(FakeClient.run_started.wait(), timeout=1)
         session = FakeClient.instances[0].sessions[0]
 
+        assert session.on_event is not None
+        session.on_event(
+            {
+                "sequence": 1,
+                "kind": "tool-use",
+                "toolCallId": "pending-call",
+                "toolName": "bash",
+                "input": '{"description": "Run slow tests"}',
+            }
+        )
         result = await self.app.wait_agent(
             extension.WaitAgentInput(agent_id=agent_id, timeout_ms=20),
             context,
@@ -935,8 +1185,33 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["data"]["status"], "running")
         self.assertEqual(result["data"]["taskRun"]["title"], "Wait for long-runner")
         self.assertEqual(result["data"]["taskRun"]["status"], "running")
+        self.assertEqual(result["data"]["taskRun"]["counts"]["running"], 1)
+        self.assertEqual(result["data"]["taskRun"]["counts"]["succeeded"], 0)
         self.assertTrue(context.tool_updates)
-        self.assertEqual(session.listeners.get("tool.call"), [])
+        self.assertFalse(session.cancelled)
+        store = await self.runtime.store_for_context(context)
+        live = self.runtime.get_live_run(store, agent_id)
+        assert live is not None
+        self.assertEqual(live.event_listeners, set())
+
+        session.on_event(
+            {
+                "sequence": 2,
+                "kind": "tool-result",
+                "toolCallId": "pending-call",
+                "toolName": "bash",
+                "success": False,
+                "error": "slow tests failed",
+            }
+        )
+        replayed = await self.app.wait_agent(
+            extension.WaitAgentInput(agent_id=agent_id, timeout_ms=20),
+            context,
+        )
+        self.assertEqual(replayed["data"]["taskRun"]["counts"]["failed"], 1)
+        [activity] = replayed["data"]["taskRun"]["activities"]
+        self.assertEqual(activity["label"], "Bash: Run slow tests")
+        self.assertEqual(activity["preview"], "slow tests failed")
 
         FakeClient.run_release.set()
         completed = await self.app.wait_agent(
@@ -944,6 +1219,68 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
             context,
         )
         self.assertEqual(completed["content"], "result for keep working")
+
+    async def test_waiters_independently_replay_bounded_child_history(self) -> None:
+        context = self.context()
+        host = ScopedChildHost()
+        context.children = ChildClient(host)
+        spawned = await self.app.spawn_agent(
+            extension.SpawnAgentInput(name="history-agent", task="many calls"), context
+        )
+        agent_id = spawned["data"]["agent_id"]
+        limit = runtime_module.CHILD_EVENT_HISTORY_LIMIT
+        host.executions["host-run-1"]["events"] = [
+            {
+                "sequence": sequence,
+                "kind": "tool-result",
+                "toolCallId": f"call-{sequence}",
+                "toolName": "file_read",
+                "success": True,
+            }
+            for sequence in range(1, limit + 3)
+        ]
+        store = await self.runtime.store_for_context(context)
+        live = self.runtime.get_live_run(store, agent_id)
+        assert live is not None
+
+        async def events_received() -> bool:
+            return bool(live.events and live.events[-1]["sequence"] == limit + 2)
+
+        await wait_until(events_received)
+        self.assertEqual(len(live.events), limit)
+        self.assertEqual(live.events[0]["sequence"], 3)
+        results = await asyncio.gather(
+            *(
+                self.app.wait_agent(
+                    extension.WaitAgentInput(agent_id=agent_id, timeout_ms=150),
+                    self.context(),
+                )
+                for _ in range(2)
+            )
+        )
+        for result in results:
+            self.assertEqual(result["data"]["taskRun"]["status"], "running")
+            self.assertEqual(
+                result["data"]["taskRun"]["counts"],
+                {"succeeded": limit, "failed": 0, "running": 0},
+            )
+            self.assertEqual(result["data"]["taskRun"]["omittedSucceeded"], limit - 3)
+        self.assertEqual(len(live.events), limit)
+        self.assertEqual(live.event_listeners, set())
+
+        waiting = asyncio.create_task(
+            self.app.wait_agent(extension.WaitAgentInput(agent_id=agent_id), self.context())
+        )
+
+        async def wait_subscribed() -> bool:
+            return bool(live.event_listeners)
+
+        await wait_until(wait_subscribed)
+        waiting.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await waiting
+        self.assertEqual(live.event_listeners, set())
+        self.assertFalse(any(method == "kodelet.child.cancel" for method, _, _ in host.calls))
 
     async def test_followup_reforks_when_interrupted_before_attachment(self) -> None:
         context = self.context()
@@ -1161,12 +1498,12 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         session = FakeSession(client, "child-steering")
         live = self.runtime.live_run_from_claim(claim, "long task", store)
         live.conversation_id = session.id
-        FakeClient.steer_outcomes = ["promptRequired", "injected"]
+        FakeClient.steer_outcomes = ["failed", "injected"]
         with (
             mock.patch.object(runtime_module, "STEERING_POLL_SECONDS", 0.01),
             mock.patch.object(runtime_module, "STEERING_RETRY_SECONDS", 0.01),
         ):
-            pump = asyncio.create_task(self.runtime.steering_pump(live, session))
+            pump = asyncio.create_task(self.runtime.steering_pump(live, cast(Any, session)))
             try:
                 await asyncio.wait_for(session.steer_received.wait(), timeout=1)
 
@@ -1181,6 +1518,7 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
             session.steer_calls,
             ["focus on the parser", "focus on the parser"],
         )
+        self.assertEqual(len(set(session.steer_request_ids)), 1)
         self.assertIsNone(await store.next_steering(claim.lease))
 
         await store.enqueue_steering(
@@ -1455,8 +1793,8 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             mock.patch.object(runtime_module, "CANCEL_CLEANUP_TIMEOUT_SECONDS", 0.01),
-            mock.patch.object(runtime_module, "CLIENT_CLOSE_RETRY_INITIAL_SECONDS", 0.01),
-            mock.patch.object(runtime_module, "CLIENT_CLOSE_RETRY_MAX_SECONDS", 0.01),
+            mock.patch.object(runtime_module, "CHILD_CANCEL_RETRY_INITIAL_SECONDS", 0.01),
+            mock.patch.object(runtime_module, "CHILD_CANCEL_RETRY_MAX_SECONDS", 0.01),
         ):
             canceled = await self.app.cancel_agent(
                 extension.CancelAgentInput(agent_id=agent_id),
@@ -1508,7 +1846,7 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(FakeClient.run_started.wait(), timeout=1)
             owner_store = await self.runtime.store_for_context(context)
 
-            other_runtime = RuntimeState(runtime_id="other-runtime", client_factory=FakeClient)
+            other_runtime = RuntimeState(runtime_id="other-runtime")
             other_app = extension.SubagentApplication(other_runtime)
             canceled = await other_app.cancel_agent(
                 extension.CancelAgentInput(agent_id=agent_id),
@@ -1798,11 +2136,12 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.owned_runs, {})
         self.assertEqual(self.runtime.cleanup_tasks, set())
 
-    async def test_shutdown_during_client_close_still_releases_background_lease(
+    async def test_shutdown_during_child_cancel_still_releases_background_lease(
         self,
     ) -> None:
         context = self.context()
         FakeClient.block_close = True
+        FakeClient.run_failure = RuntimeError("child read failed")
         spawned = await self.app.spawn_agent(
             extension.SpawnAgentInput(
                 name="client-cleanup-worker",
@@ -1915,7 +2254,7 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
                 if not shutdown.done():
                     await asyncio.wait_for(shutdown, timeout=1)
 
-    async def test_startup_timeout_is_persisted_as_failure(self) -> None:
+    async def test_startup_timeout_releases_lease_and_removes_unattached_reservation(self) -> None:
         context = self.context()
         FakeClient.block_startup = True
         with mock.patch.object(runtime_module, "AGENT_START_TIMEOUT_SECONDS", 0.02):
@@ -1929,20 +2268,14 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
             )
             await asyncio.wait_for(FakeClient.startup_started.wait(), timeout=1)
             store = await self.runtime.store_for_context(context)
-            failed = await self.wait_for_status(
-                store,
-                context.conversation_id,
-                spawned["data"]["agent_id"],
-                "failed",
-            )
-        self.assertEqual(failed.run.status, "failed")
-        self.assertIn("timed out while starting", failed.run.error)
+            self.assertEqual(await store.list(context.conversation_id), [])
+        self.assertIn("error", spawned)
+        self.assertEqual(self.runtime.owned_runs, {})
 
         async def background_lease_closed() -> bool:
             return bool(context.background_leases and context.background_leases[0].close_calls == 1)
 
         await wait_until(background_lease_closed)
-        self.assertTrue(FakeClient.instances[0].closed)
 
     async def test_background_lease_release_retries_transient_failures(self) -> None:
         context = self.context()
@@ -2162,6 +2495,298 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "shutting down"):
             await reservation
         self.assertEqual(await store.list(context.conversation_id), [])
+
+    async def test_real_sdk_fork_resume_exact_steer_and_cancel(self) -> None:
+        context = self.context()
+        host = ScopedChildHost()
+        context.children = ChildClient(host)
+        spawned = await self.app.spawn_agent(
+            extension.SpawnAgentInput(name="sdk-agent", task="first task"), context
+        )
+        agent_id = spawned["data"]["agent_id"]
+        first_id = spawned["data"]["conversation_id"]
+        first_method, first_params, persistent = host.calls[0]
+        self.assertEqual(first_method, "kodelet.child.start")
+        self.assertFalse(persistent)
+        self.assertEqual(
+            first_params,
+            {
+                "profile": "subagent",
+                "message": "first task",
+                "contextMode": "fork",
+                "requestId": spawned["data"]["run_id"],
+                "cwd": context.cwd,
+                "leaseId": "lease-1",
+            },
+        )
+        self.assertEqual(context.fork_names, [])  # Fork and admission are one daemon operation.
+        host.executions["host-run-1"]["done"] = True
+        completed = await self.app.wait_agent(
+            extension.WaitAgentInput(agent_id=agent_id, timeout_ms=1_000), context
+        )
+        self.assertEqual(completed["content"], "result for first task")
+
+        followed = await self.app.followup_agent(
+            extension.FollowupAgentInput(agent_id=agent_id, task="second task"), context
+        )
+        self.assertEqual(followed["data"]["conversation_id"], first_id)
+        starts = [call for call in host.calls if call[0] == "kodelet.child.start"]
+        self.assertEqual(len(starts), 2)
+        _, resumed_params, persistent = starts[1]
+        self.assertFalse(persistent)  # The new lease is authorized by this follow-up tool.
+        self.assertNotIn("contextMode", resumed_params)
+        self.assertEqual(resumed_params["resume"], first_id)
+        self.assertEqual(resumed_params["leaseId"], "lease-2")
+        self.assertNotEqual(resumed_params["requestId"], first_params["requestId"])
+        await self.app.steer_agent(
+            extension.SteerAgentInput(agent_id=agent_id, message="From parent: inspect tests"),
+            context,
+        )
+
+        async def was_steered() -> bool:
+            return any(method == "kodelet.child.steer" for method, _, _ in host.calls)
+
+        await wait_until(was_steered)
+        _, params, persistent = next(
+            call for call in host.calls if call[0] == "kodelet.child.steer"
+        )
+        self.assertTrue(persistent)
+        self.assertEqual(params["childRunId"], "host-run-2")
+        self.assertEqual(params["childId"], first_id)
+        self.assertEqual(params["message"], "From parent: inspect tests")
+        self.assertTrue(params["requestId"].startswith(f"{agent_id}:steering:"))
+        canceled = await self.app.cancel_agent(
+            extension.CancelAgentInput(agent_id=agent_id), context
+        )
+        self.assertEqual(canceled["data"]["agent_status"], "canceled")
+        cancellations = [call for call in host.calls if call[0] == "kodelet.child.cancel"]
+        self.assertTrue(cancellations)
+        self.assertTrue(all(call[1]["childRunId"] == "host-run-2" for call in cancellations))
+        self.assertEqual(self.runtime.owned_runs, {})
+
+    async def test_steering_prompt_required_preserves_queue_for_followup(self) -> None:
+        context = self.context()
+        host = ScopedChildHost()
+        host.steer_outcome = "promptRequired"
+        context.children = ChildClient(host)
+        spawned = await self.app.spawn_agent(
+            extension.SpawnAgentInput(name="queued-agent", task="first"), context
+        )
+        agent_id = spawned["data"]["agent_id"]
+        await self.app.steer_agent(
+            extension.SteerAgentInput(agent_id=agent_id, message="retain this guidance"), context
+        )
+        store = await self.runtime.store_for_context(context)
+
+        async def was_steered() -> bool:
+            return any(method == "kodelet.child.steer" for method, _, _ in host.calls)
+
+        await wait_until(was_steered)
+        self.assertEqual(len(self.steering_rows(store.path)), 1)
+        host.executions["host-run-1"]["done"] = True
+        await self.app.wait_agent(
+            extension.WaitAgentInput(agent_id=agent_id, timeout_ms=1_000), context
+        )
+        host.steer_outcome = "injected"
+        await self.app.followup_agent(
+            extension.FollowupAgentInput(agent_id=agent_id, task="continue"), context
+        )
+
+        async def acknowledged() -> bool:
+            return not self.steering_rows(store.path)
+
+        await wait_until(acknowledged)
+        messages = [params for method, params, _ in host.calls if method == "kodelet.child.steer"]
+        self.assertEqual(
+            [message["childRunId"] for message in messages], ["host-run-1", "host-run-2"]
+        )
+        self.assertEqual(messages[0]["requestId"], messages[1]["requestId"])
+        await self.app.cancel_agent(extension.CancelAgentInput(agent_id=agent_id), context)
+
+    async def test_uncertain_start_cancellation_waits_for_lease_revocation_ack(self) -> None:
+        context = self.context(block_background_release=True)
+        host = ScopedChildHost()
+        host.block_start = True
+        context.children = ChildClient(host)
+        spawning = asyncio.create_task(
+            self.app.spawn_agent(
+                extension.SpawnAgentInput(name="uncertain-agent", task="admitted before response"),
+                context,
+            )
+        )
+        await asyncio.wait_for(host.start_entered.wait(), timeout=1)
+        store = await self.runtime.store_for_context(context)
+        [reserved] = await store.list(context.conversation_id)
+        self.assertFalse(spawning.done())
+        live = self.runtime.get_live_run(store, reserved.id)
+        assert live is not None
+        self.assertIsNone(live.runner_task)
+        with mock.patch.object(runtime_module, "CANCEL_CLEANUP_TIMEOUT_SECONDS", 0.01):
+            canceled = await self.app.cancel_agent(
+                extension.CancelAgentInput(agent_id=reserved.id), context
+            )
+        self.assertEqual(canceled["data"]["agent_status"], "canceling")
+        self.assertFalse(spawning.done())
+        self.assertTrue(self.runtime.owned_runs)
+        self.assertEqual(len(host.executions), 1)
+        blocked = await self.app.followup_agent(
+            extension.FollowupAgentInput(agent_id=reserved.id, task="not yet"), context
+        )
+        self.assertIn("cancellation is still in progress", blocked["error"])
+        # The host ACK only succeeds once the unknown child has actually stopped.
+        host.executions["host-run-1"]["done"] = True
+        context.background_leases[0].close_release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await spawning
+        self.assertEqual((await store.get(context.conversation_id, reserved.id)).status, "canceled")
+        self.assertEqual(self.runtime.owned_runs, {})
+
+    async def test_legacy_resume_rejection_preserves_identity_and_records_failure(self) -> None:
+        context = self.context()
+        store = await self.runtime.store_for_context(context)
+        claim = await store.create(
+            context.conversation_id, "legacy-agent", "old", context.cwd, "fork"
+        )
+        await store.mark_running(claim.lease, "legacy-conversation")
+        await store.terminal(claim.lease, "idle", result="old result")
+        host = ScopedChildHost()
+        host.reject_start = "child conversation lacks delegation ownership; start a new agent"
+        context.children = ChildClient(host)
+        result = await self.app.followup_agent(
+            extension.FollowupAgentInput(agent_id=claim.agent.id, task="resume"), context
+        )
+        self.assertIn("start a new agent", result["error"])
+        agent = await store.get(context.conversation_id, claim.agent.id)
+        self.assertEqual(agent.conversation_id, "legacy-conversation")
+        self.assertEqual(agent.status, "failed")
+        self.assertEqual(agent.run.generation, 2)
+        self.assertEqual(context.background_leases[0].close_calls, 1)
+        self.assertEqual(host.executions, {})
+
+    async def test_lost_child_result_uses_acknowledged_lease_release_before_cancel_complete(
+        self,
+    ) -> None:
+        context = self.context(block_background_release=True)
+        context.background_release_failures = 1
+        host = ScopedChildHost()
+        host.reject_reads = True
+        host.cancel_done = False
+        context.children = ChildClient(host)
+        with (
+            mock.patch.object(runtime_module, "CANCEL_CLEANUP_TIMEOUT_SECONDS", 0.01),
+            mock.patch.object(runtime_module, "CHILD_CANCEL_TIMEOUT_SECONDS", 0.02),
+            mock.patch.object(runtime_module, "HEARTBEAT_INTERVAL_SECONDS", 0.01),
+            mock.patch.object(runtime_module, "MIN_HEARTBEAT_INTERVAL_SECONDS", 0.001),
+            mock.patch.object(
+                runtime_module, "BACKGROUND_LEASE_RELEASE_RETRY_INITIAL_SECONDS", 0.01
+            ),
+        ):
+            spawned = await self.app.spawn_agent(
+                extension.SpawnAgentInput(name="release-agent", task="must actually stop"), context
+            )
+            agent_id = spawned["data"]["agent_id"]
+            lease = context.background_leases[0]
+            # A cancel can arrive after transport failure has begun draining.
+            await asyncio.wait_for(lease.close_started.wait(), timeout=1)
+            result = await self.app.cancel_agent(
+                extension.CancelAgentInput(agent_id=agent_id), context
+            )
+            self.assertEqual(result["data"]["agent_status"], "canceling")
+            store = await self.runtime.store_for_context(context)
+            self.assertEqual(
+                (await store.get(context.conversation_id, agent_id)).status, "canceling"
+            )
+            self.assertTrue(self.runtime.owned_runs)
+            self.assertFalse(host.executions["host-run-1"]["done"])
+            live = self.runtime.get_live_run(store, agent_id)
+            assert live is not None
+            expires_at = live.lease.expires_at
+
+            async def cancellation_renewed() -> bool:
+                return live.lease.expires_at > expires_at
+
+            await wait_until(cancellation_renewed)
+            host.executions["host-run-1"]["done"] = True
+            lease.close_release.set()
+            await self.wait_for_status(store, context.conversation_id, agent_id, "canceled")
+
+            async def cleanup_finished() -> bool:
+                return not self.runtime.owned_runs
+
+            await wait_until(cleanup_finished)
+        self.assertEqual(lease.close_calls, 2)
+        self.assertEqual((await store.get(context.conversation_id, agent_id)).status, "canceled")
+
+    async def test_child_read_failure_retains_active_claim_until_lease_release_ack(self) -> None:
+        context = self.context(block_background_release=True)
+        host = ScopedChildHost()
+        host.reject_reads = True
+        host.cancel_done = False
+        context.children = ChildClient(host)
+        with mock.patch.object(runtime_module, "CHILD_CANCEL_TIMEOUT_SECONDS", 0.02):
+            spawned = await self.app.spawn_agent(
+                extension.SpawnAgentInput(name="read-failure-agent", task="still running"),
+                context,
+            )
+            agent_id = spawned["data"]["agent_id"]
+            lease = context.background_leases[0]
+            await asyncio.wait_for(lease.close_started.wait(), timeout=1)
+            store = await self.runtime.store_for_context(context)
+            self.assertEqual((await store.get(context.conversation_id, agent_id)).status, "running")
+            self.assertFalse(host.executions["host-run-1"]["done"])
+            self.assertTrue(self.runtime.owned_runs)
+            followup = await self.app.followup_agent(
+                extension.FollowupAgentInput(agent_id=agent_id, task="not yet"), context
+            )
+            self.assertIn("error", followup)
+            self.assertEqual(len(host.executions), 1)
+            self.assertEqual((await store.get(context.conversation_id, agent_id)).run.generation, 1)
+            host.executions["host-run-1"]["done"] = True
+            lease.close_release.set()
+            failed = await self.wait_for_status(store, context.conversation_id, agent_id, "failed")
+            self.assertIn("transport unavailable", failed.run.error)
+
+            async def cleanup_finished() -> bool:
+                return not self.runtime.owned_runs
+
+            await wait_until(cleanup_finished)
+
+    async def test_cwd_rejection_precedes_database_and_child_effects(self) -> None:
+        context = self.context()
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.cwd / "escape").symlink_to(outside, target_is_directory=True)
+        for cwd in (str(outside), "../outside", "escape"):
+            with self.subTest(cwd=cwd):
+                result = await self.app.spawn_agent(
+                    extension.SpawnAgentInput(name="outside-agent", task="do not run", cwd=cwd),
+                    context,
+                )
+                self.assertIn("workspace or a descendant", result["error"])
+        self.assertEqual(context.children.start_calls, [])
+        self.assertEqual(context.background_leases, [])
+        self.assertEqual(self.runtime.stores, {})
+        self.assertFalse((self.data_dir / DATABASE_FILENAME).exists())
+
+    async def test_followup_rejects_legacy_outside_cwd_without_claiming_generation(self) -> None:
+        context = self.context()
+        store = await self.runtime.store_for_context(context)
+        outside = self.root / "legacy-workspace"
+        outside.mkdir()
+        claim = await store.create(
+            context.conversation_id, "legacy-outside", "old task", str(outside), "fresh"
+        )
+        await store.mark_running(claim.lease, "old-conversation")
+        await store.terminal(claim.lease, "idle", result="old output")
+        result = await self.app.followup_agent(
+            extension.FollowupAgentInput(agent_id=claim.agent.id, task="do not run"), context
+        )
+        self.assertIn("workspace or a descendant", result["error"])
+        stored = await store.get(context.conversation_id, claim.agent.id)
+        self.assertEqual(stored.run.generation, 1)
+        self.assertEqual(stored.status, "idle")
+        self.assertEqual(context.children.start_calls, [])
+        self.assertEqual(context.background_leases, [])
 
 
 if __name__ == "__main__":
