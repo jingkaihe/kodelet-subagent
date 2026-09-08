@@ -13,11 +13,15 @@ The extension provides six tools:
 
 Agent identity, run history, leases, and steering messages are stored in SQLite. The extension initializes and upgrades its database automatically before serving tools.
 
-Agents run through the daemon's scoped child API, with provider credentials and conversation history kept on the daemon. Forks, follow-ups, steering, and cancellation preserve child ownership and policy. Child directories must be the current runner workspace or a descendant. A `running` status reflects the runtime's lease, not a guarantee of recent model or tool progress.
+Agents use the SDK's ACP client, keeping model credentials and history on the daemon. Named forks preserve agent titles; follow-ups reuse the conversation. TUI/Web UI streaming and late-waiter tool progress use normal SDK events.
+
+Use `context_mode="fresh"` for another directory, subject to runner policy; forks and resumes retain their saved cwd. Fresh agents require inline ACP extension support to disable recursive subagent controls while keeping `code_search` available.
+
+The SDK handles messages up to 64 MiB each and owns transport cleanup. Background leases remain held until client cleanup finishes; `running` indicates ownership, not recent progress.
 
 ## Installation
 
-Requirements: Kodelet with scoped child fork/resume/steering support, `kodelet-sdk` 0.2.2 or newer, Python 3.11 or newer, and `uv`. Install on the runner host. Background runs are bounded to one hour; cancellation and disconnect can end them earlier. Legacy ACP-created agents remain listed, but cannot be resumed without daemon-validated delegation ownership; start a new named agent instead.
+Requires Python 3.11+, `uv`, `kodelet-sdk>=0.3.0,<0.4`, and Kodelet with background leases, conversation forks, and inline ACP extensions. Install on the runner host with normal daemon client credentials; runner tokens alone are insufficient. Runs are limited to one hour.
 
 Run the package's installer directly with `uvx`:
 

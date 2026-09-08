@@ -14,7 +14,9 @@ Key modules:
 - `persistence/` owns records, transactional state changes, and migrations.
 - `install.py` owns the idempotent global Kodelet extension-wrapper installer.
 
-Runtime ownership covers database reservation, background-lease/child admission, the live worker, and final child/background-lease cleanup. The first `ctx.children.start` must be awaited inside the originating tool handler to establish retained authority; workers only wait/read/steer already admitted children. `live_runs` is only the current-generation lookup for an agent; `owned_runs` retains every generation by run ID until its finalizer completes. Shutdown must stop new launches, drain reservations, cancel and await all `owned_runs`, await runtime-owned finalizers, and only then reconcile remaining rows.
+Runtime ownership covers database reservation, background-lease/named-conversation setup, the live ACP worker, and final SDK-client/background-lease cleanup. Fork parent context with `ctx.fork_conversation(name=agent.name)` in the originating tool handler, then resume that conversation through the SDK `Client`; fresh agents create a new ACP session. Use `session.run_and_wait`, `session.steer`, and `TaskProgress.attach(session)` rather than an alternate execution or event API. The SDK owns bounded ACP transport and partial-startup/repeated-cancellation cleanup; do not duplicate that transport here.
+
+`live_runs` is only the current-generation lookup for an agent; `owned_runs` retains every generation by run ID until its finalizer completes. Failure and cancellation must retain their active database claim until client cleanup completes, with a fenced heartbeat throughout cleanup. Shutdown must stop new launches, drain reservations, cancel and await all `owned_runs`, await runtime-owned finalizers, and only then reconcile remaining rows. ACP requires normal daemon client authentication; do not widen runner credentials. Fresh agents may select another directory within runner policy; forks and resumes retain their saved cwd.
 
 ## Development
 

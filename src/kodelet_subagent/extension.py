@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 import textwrap
 from collections.abc import Mapping
@@ -16,7 +15,6 @@ from kodelet_sdk import (
     BaseModel,
     EventContext,
     EventResult,
-    ExecutionProfile,
     Extension,
     Field,
     SessionEndEvent,
@@ -42,8 +40,8 @@ from .persistence import (
     SpawnContextMode,
     validate_agent_name,
 )
-from .runtime import RECURSION_GUARD_ENV, RuntimeState
-from .ui import forward_child_progress, public_snapshot
+from .runtime import AGENT_TOOL_NAMES, RECURSION_GUARD_ENV, RuntimeState
+from .ui import agent_task_progress, public_snapshot, publish_task_progress
 
 SPAWN_AGENT_DESCRIPTION = textwrap.dedent(
     """
@@ -100,14 +98,6 @@ STEER_TOOL_TIMEOUT_SECONDS = 15
 CANCEL_TOOL_TIMEOUT_SECONDS = 15
 MAX_WAIT_MILLISECONDS = 5 * 60 * 1000
 PRESENTATION_TASK_PREVIEW_LENGTH = 160
-AGENT_TOOL_NAMES = (
-    "spawn_agent",
-    "wait_agent",
-    "list_agents",
-    "followup_agent",
-    "steer_agent",
-    "cancel_agent",
-)
 
 
 class SpawnAgentInput(BaseModel):
@@ -236,8 +226,6 @@ def resolve_agent_cwd(raw_cwd: str | None, workspace_cwd: str) -> Path:
     if not candidate.is_absolute():
         candidate = Path(workspace_cwd) / candidate
     resolved = candidate.resolve()
-    if not resolved.is_relative_to(workspace):
-        raise ValueError("agent cwd must be the current workspace or a descendant directory")
     if not resolved.exists():
         raise ValueError(f"cwd does not exist: {resolved}")
     if not resolved.is_dir():
@@ -299,7 +287,6 @@ class SubagentApplication:
     def __init__(self, runtime: RuntimeState | None = None) -> None:
         self.runtime = runtime or RuntimeState()
         self.extension = SubagentExtension(self.runtime)
-        self.extension.register_profile(ExecutionProfile(name="subagent"))
         self._register_handlers()
 
     def _register_handlers(self) -> None:
@@ -471,14 +458,14 @@ class SubagentApplication:
         except Exception as exc:
             return tool_error(f"wait_agent failed: {exc}", summary=summary)
 
-        await self.runtime.safe_sync_agent_widget(ctx.ui, store, owner_id)
         snapshot = public_snapshot(
             agent,
-            include_result=agent.run.status == "completed",
+            include_result=agent.run.status not in ACTIVE_RUN_STATUSES,
         )
         snapshot["presentation"] = tool_presentation(summary)
         if progress is not None:
             snapshot["taskRun"] = await self._finish_wait_progress(progress, agent)
+        await self.runtime.safe_sync_agent_widget(ctx.ui, store, owner_id)
         return self._wait_result(agent, snapshot)
 
     async def _wait_for_active_run(
@@ -489,82 +476,40 @@ class SubagentApplication:
         agent: AgentRecord,
         timeout_ms: int,
     ) -> tuple[AgentRecord, TaskProgress]:
-        progress = TaskProgress(
-            cast(TaskProgressContext, ctx),
-            kind="subagent",
-            task=agent.run.task,
-            cwd=agent.cwd,
-            running_title=f"Wait for {agent.name}",
-            completed_title=f"Wait for {agent.name}",
-            failed_title=f"Wait for {agent.name}",
-            responding_detail="agent is responding",
-        )
-        try:
-            agent = await self._poll_agent_run(
-                progress,
-                store,
-                owner_id,
-                agent,
-                timeout_ms,
-            )
-        except asyncio.CancelledError:
-            with contextlib.suppress(Exception):
-                await progress.finish(success=False, error="wait canceled")
-            raise
-        except Exception as exc:
-            with contextlib.suppress(Exception):
-                await progress.finish(success=False, error=str(exc))
-            raise
-        return agent, progress
-
-    async def _poll_agent_run(
-        self,
-        progress: TaskProgress,
-        store: AgentStore,
-        owner_id: str,
-        agent: AgentRecord,
-        timeout_ms: int,
-    ) -> AgentRecord:
+        # The fallback is snapshot-only (no listeners or publisher tasks), for a
+        # run owned by another process or one still entering runtime ownership.
+        progress = agent_task_progress(agent)
         selected_run_id = agent.run.id
         owned_key = self.runtime.owned_run_key(store, selected_run_id)
-        # Keep this generation's events even if cleanup or a follow-up removes
-        # its runtime lookup while the wait is publishing or polling.
-        live = self.runtime.owned_runs.get(owned_key)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_ms / 1000
-        active_calls: set[str] = set()
-
-        def on_event(event: dict[str, Any]) -> None:
-            forward_child_progress(progress, event, agent.cwd, active_calls)
-
-        try:
-            if live is not None:
-                live.subscribe_events(on_event)
-            await progress.start()
-            while agent.run.status in ACTIVE_RUN_STATUSES:
-                if live is None:
-                    live = self.runtime.owned_runs.get(owned_key)
-                    if live is not None:
-                        live.subscribe_events(on_event)
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    break
-                await asyncio.sleep(min(WAIT_POLL_SECONDS, remaining))
-                agent = await store.get(owner_id, agent.id, selected_run_id)
-        finally:
-            if live is not None:
-                live.event_listeners.discard(on_event)
-        return agent
+        tracking_live = False
+        revision = -1
+        while agent.run.status in ACTIVE_RUN_STATUSES:
+            if not tracking_live:
+                live = self.runtime.owned_runs.get(owned_key)
+                if live is not None:
+                    # Hold this exact generation even after cleanup/follow-up.
+                    progress = live.progress
+                    tracking_live = True
+            snapshot = progress.snapshot()
+            if snapshot["revision"] != revision:
+                await publish_task_progress(cast(TaskProgressContext, ctx), snapshot)
+                revision = snapshot["revision"]
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(WAIT_POLL_SECONDS, remaining))
+            agent = await store.get(owner_id, agent.id, selected_run_id)
+        return agent, progress
 
     @staticmethod
     async def _finish_wait_progress(
         progress: TaskProgress,
         agent: AgentRecord,
     ) -> TaskRunSnapshot:
-        if agent.run.status in ACTIVE_RUN_STATUSES:
-            await progress.flush()
-            task_run = progress.snapshot()
-            await progress.finish(success=True)
+        task_run = progress.snapshot()
+        if agent.run.status in ACTIVE_RUN_STATUSES or task_run["status"] != "running":
             return task_run
         success = agent.run.status == "completed"
         error = None if success else agent.run.error or f"agent {agent.run.status}"
@@ -590,7 +535,10 @@ class SubagentApplication:
                 f"Agent {agent.name!r} was interrupted: "
                 f"{agent.run.error or 'worker stopped'}. Use followup_agent to resume it."
             )
-            return {"content": message, "error": message, "data": snapshot}
+            content = message
+            if agent.run.result:
+                content += f"\n\nPartial output (agent did not complete):\n{agent.run.result}"
+            return {"content": content, "error": message, "data": snapshot}
         if agent.status == "canceling":
             return {
                 "content": (
@@ -668,7 +616,6 @@ class SubagentApplication:
             store = await self.runtime.store_for_context(ctx)
             agent = await store.get(owner_id, agent_id)
             summary = f"Follow up {agent.name}"
-            resolve_agent_cwd(agent.cwd, ctx.cwd)
             if agent.status == "canceling":
                 raise AgentConflictError(
                     "agent cancellation is still in progress; retry followup_agent shortly"

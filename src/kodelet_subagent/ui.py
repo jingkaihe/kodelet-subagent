@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-from kodelet_sdk import TaskProgress, UIFrameLine, UIStyle, UIStyledSpan, format_task_tool_activity
+from kodelet_sdk import (
+    LogContext,
+    TaskProgress,
+    TaskProgressContext,
+    TaskProgressLogger,
+    TaskRunSnapshot,
+    UIFrameLine,
+    UIStyle,
+    UIStyledSpan,
+)
 
 from .persistence import ACTIVE_RUN_STATUSES, AgentRecord
 
@@ -15,42 +23,40 @@ WIDGET_ID = "background-agents"
 WIDGET_AGENT_LIMIT = 8
 
 
-def forward_child_progress(
-    progress: TaskProgress,
-    event: Mapping[str, Any],
-    cwd: str,
-    active_calls: set[str],
-) -> None:
-    """Render scoped child events like the code-search extension's activities."""
+class _SnapshotProgressContext:
+    """Accumulate SDK progress without publishing to an expired spawn/wait call."""
 
-    kind = event["kind"]
-    call_id = event.get("toolCallId")
-    tool_name = event.get("toolName") or "tool"
-    if kind == "tool-use" and call_id:
-        try:
-            tool_input = json.loads(event["input"])
-        except json.JSONDecodeError:
-            tool_input = None  # Bounded host previews can truncate JSON.
-        if isinstance(tool_input, dict):
-            label, detail = format_task_tool_activity(tool_name, tool_input, cwd)
-        else:
-            label, detail = tool_name, f"running {tool_name}"
-        progress.start_activity(call_id, label=label, detail=detail, kind=tool_name)
-        active_calls.add(call_id)
-    elif kind == "tool-update" and call_id:
-        progress.update_activity(call_id, event.get("toolOutput"))
-    elif kind == "tool-result" and call_id:
-        if call_id not in active_calls:
-            # A bounded event window may retain the result but not its start.
-            progress.start_activity(call_id, label=tool_name, kind=tool_name)
-        progress.finish_activity(
-            call_id,
-            success=event["success"],
-            result=event.get("error") or event.get("toolOutput"),
-        )
-        active_calls.discard(call_id)
-    elif kind in {"text", "text-delta"}:
-        progress.mark_responding()
+    log: TaskProgressLogger = LogContext("kodelet-subagent")
+
+    async def update(self, content: str, data: Mapping[str, Any] | None = None) -> None:
+        pass
+
+
+def agent_task_progress(agent: AgentRecord) -> TaskProgress:
+    """Keep bounded activity history for a run, independently of its waiters."""
+
+    return TaskProgress(
+        _SnapshotProgressContext(),
+        kind="subagent",
+        task=agent.run.task,
+        cwd=agent.cwd,
+        running_title=f"Wait for {agent.name}",
+        completed_title=f"Wait for {agent.name}",
+        failed_title=f"Wait for {agent.name}",
+        responding_detail="agent is responding",
+    )
+
+
+async def publish_task_progress(ctx: TaskProgressContext, snapshot: TaskRunSnapshot) -> None:
+    """Forward a snapshot only while its wait call is alive; do not spawn a task."""
+
+    content = snapshot["title"]
+    if snapshot["detail"]:
+        content += f" - {snapshot['detail']}"
+    try:
+        await ctx.update(content, {"taskRun": snapshot})
+    except Exception as exc:
+        ctx.log.warn("failed to publish tool update", {"error": str(exc)})
 
 
 def timestamp(value: float | None) -> str | None:
@@ -87,7 +93,8 @@ def public_snapshot(
     if agent.run.error:
         snapshot["error"] = agent.run.error
     if include_result and agent.run.result is not None:
-        snapshot["result"] = agent.run.result
+        result_key = "result" if agent.run.status == "completed" else "partial_result"
+        snapshot[result_key] = agent.run.result
     return snapshot
 
 
@@ -161,7 +168,6 @@ __all__ = [
     "WIDGET_ID",
     "agent_widget_line",
     "agent_widget_lines",
-    "forward_child_progress",
     "public_snapshot",
     "timestamp",
 ]
