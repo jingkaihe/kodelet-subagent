@@ -1745,7 +1745,17 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         store = await self.runtime.store_for_context(context)
         background_lease = context.background_leases[0]
 
-        with mock.patch.object(runtime_module, "CANCEL_CLEANUP_TIMEOUT_SECONDS", 0.01):
+        original_cancel = self.runtime.cancel_live_run
+
+        async def cancel_before_lease_release(
+            store: AgentStore, agent_id: str, run_id: str
+        ) -> bool:
+            complete = await original_cancel(store, agent_id, run_id, cleanup_timeout=0)
+            # The response must observe child cleanup, not win a 10 ms race.
+            await asyncio.wait_for(background_lease.close_started.wait(), timeout=1)
+            return complete
+
+        with mock.patch.object(self.runtime, "cancel_live_run", new=cancel_before_lease_release):
             canceled = await self.app.cancel_agent(
                 extension.CancelAgentInput(agent_id=agent_id),
                 context,
@@ -2071,6 +2081,8 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_owns_blocked_background_acquisition(self) -> None:
         context = self.context(block_background_acquire=True)
+        # Database migrations are setup, not part of the acquisition deadline.
+        store = await self.runtime.store_for_context(context)
         spawning = asyncio.create_task(
             self.app.spawn_agent(
                 extension.SpawnAgentInput(
@@ -2081,24 +2093,33 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
                 context,
             )
         )
-        await asyncio.wait_for(context.background_acquire_started.wait(), timeout=1)
-        store = await self.runtime.store_for_context(context)
-        [reserved] = await store.list(context.conversation_id)
 
-        canceled = await self.app.cancel_agent(
-            extension.CancelAgentInput(agent_id=reserved.id),
-            context,
-        )
-        self.assertIn("Use followup_agent to resume it later", canceled["content"])
-        with self.assertRaises(asyncio.CancelledError):
-            await spawning
-        persisted = await store.get(context.conversation_id, reserved.id)
-        self.assertEqual(persisted.status, "canceled")
-        self.assertEqual(persisted.run.status, "canceled")
-        self.assertEqual(context.background_leases, [])
-        self.assertEqual(FakeClient.instances, [])
-        self.assertEqual(self.runtime.live_runs, {})
-        self.assertEqual(self.runtime.owned_runs, {})
+        async def acquisition_started() -> bool:
+            if spawning.done():
+                self.fail(f"spawn ended before acquiring background ownership: {spawning.result()}")
+            return context.background_acquire_started.is_set()
+
+        try:
+            await wait_until(acquisition_started)
+            [reserved] = await store.list(context.conversation_id)
+
+            canceled = await self.app.cancel_agent(
+                extension.CancelAgentInput(agent_id=reserved.id),
+                context,
+            )
+            self.assertIn("Use followup_agent to resume it later", canceled["content"])
+            with self.assertRaises(asyncio.CancelledError):
+                await spawning
+            persisted = await store.get(context.conversation_id, reserved.id)
+            self.assertEqual(persisted.status, "canceled")
+            self.assertEqual(persisted.run.status, "canceled")
+            self.assertEqual(context.background_leases, [])
+            self.assertEqual(FakeClient.instances, [])
+            self.assertEqual(self.runtime.live_runs, {})
+            self.assertEqual(self.runtime.owned_runs, {})
+        finally:
+            spawning.cancel()
+            await asyncio.gather(spawning, return_exceptions=True)
 
     async def test_completed_run_remains_owned_until_background_lease_release(
         self,
