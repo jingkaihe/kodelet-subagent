@@ -21,7 +21,7 @@ The SDK handles messages up to 64 MiB each and owns transport cleanup. Backgroun
 
 ## Installation
 
-Requires Python 3.11+, `uv`, `kodelet-sdk>=0.3.0,<0.4`, and Kodelet with background leases, conversation forks, and inline ACP extensions. Install on the runner host with normal daemon client credentials; runner tokens alone are insufficient. Runs are limited to one hour.
+Requires Python 3.11+, `uv`, `kodelet-sdk>=0.4.0,<0.5`, and Kodelet with background leases, conversation forks, and inline ACP extensions. Install on the runner host with normal daemon client credentials; runner tokens alone are insufficient. Runs are limited to one hour.
 
 Run the package's installer directly with `uvx`:
 
