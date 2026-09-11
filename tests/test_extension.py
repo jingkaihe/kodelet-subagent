@@ -483,35 +483,6 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.dict(os.environ, {RECURSION_GUARD_ENV: "1"}):
             self.assertTrue(extension.is_agent_child(self.context()))
 
-    async def test_older_sdk_cannot_create_fresh_child_without_parent(self) -> None:
-        context = self.context()
-        with mock.patch.dict(runtime_module.CreateSessionOptions.__annotations__, {}, clear=True):
-            spawned = await self.app.spawn_agent(
-                extension.SpawnAgentInput(name="old-sdk", task="inspect", context_mode="fresh"),
-                context,
-            )
-            result = await self.app.wait_agent(
-                extension.WaitAgentInput(agent_id=spawned["data"]["agent_id"], timeout_ms=1_000),
-                context,
-            )
-        self.assertEqual(result["data"]["status"], "failed")
-        self.assertIn("kodelet-sdk 0.5.2 or newer; update the SDK", result["content"])
-        self.assertFalse(FakeClient.instances[0].create_session_calls)
-
-    async def test_older_sdk_cannot_fork_child_without_parent(self) -> None:
-        context = self.context()
-
-        async def old_fork(_self: Any, name: str | None = None) -> str:
-            raise AssertionError("old fork API must not be called")
-
-        with mock.patch.object(runtime_module.ToolContext, "fork_conversation", old_fork):
-            result = await self.app.spawn_agent(
-                extension.SpawnAgentInput(name="old-sdk", task="inspect"), context
-            )
-        self.assertIn("kodelet-sdk 0.5.2 or newer; update the SDK", result["error"])
-        self.assertFalse(context.fork_names)
-        self.assertFalse(FakeClient.instances)
-
     async def test_fresh_runs_and_followups_disable_only_subagent_controls_with_inline_hook(
         self,
     ) -> None:
