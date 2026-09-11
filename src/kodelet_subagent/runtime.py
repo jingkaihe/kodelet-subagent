@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import sqlite3
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -611,6 +612,12 @@ class RuntimeState:
         }
         if conversation_id is not None:
             options["resume"] = conversation_id
+        elif live.context_mode == "fresh":
+            if "parent_conversation_id" not in CreateSessionOptions.__annotations__:
+                raise RuntimeError(
+                    "Child agents require kodelet-sdk 0.5.2 or newer; update the SDK"
+                )
+            options["parent_conversation_id"] = live.owner_conversation_id
         if live.context_mode == "fresh":
             # Fresh conversations lack a persisted extension-fork initiator.
             # Reattach on every resume; ACP client env does not reach the runner.
@@ -877,8 +884,10 @@ class RuntimeState:
 
     @staticmethod
     async def fork_parent_context(parent_context: ToolContext, name: str) -> str:
+        if "as_child" not in inspect.signature(ToolContext.fork_conversation).parameters:
+            raise RuntimeError("Child agents require kodelet-sdk 0.5.2 or newer; update the SDK")
         try:
-            return await parent_context.fork_conversation(name=name)
+            return await parent_context.fork_conversation(name=name, as_child=True)
         except ConversationForkUnavailableError as exc:
             raise RuntimeError(
                 "context_mode='fork' requires live conversation forking; use "

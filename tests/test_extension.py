@@ -118,6 +118,7 @@ class FakeContext:
         self.block_background_acquire = block_background_acquire
         self.block_background_release = block_background_release
         self.fork_names: list[str | None] = []
+        self.fork_as_child: list[bool] = []
         self.fork_started = asyncio.Event()
         self.fork_release = asyncio.Event()
         self.background_release_failures = 0
@@ -148,8 +149,9 @@ class FakeContext:
         self.background_leases.append(lease)
         return lease
 
-    async def fork_conversation(self, name: str | None = None) -> str:
+    async def fork_conversation(self, name: str | None = None, *, as_child: bool = False) -> str:
         self.fork_names.append(name)
+        self.fork_as_child.append(as_child)
         self.fork_started.set()
         if self.block_fork:
             await self.fork_release.wait()
@@ -481,6 +483,35 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.dict(os.environ, {RECURSION_GUARD_ENV: "1"}):
             self.assertTrue(extension.is_agent_child(self.context()))
 
+    async def test_older_sdk_cannot_create_fresh_child_without_parent(self) -> None:
+        context = self.context()
+        with mock.patch.dict(runtime_module.CreateSessionOptions.__annotations__, {}, clear=True):
+            spawned = await self.app.spawn_agent(
+                extension.SpawnAgentInput(name="old-sdk", task="inspect", context_mode="fresh"),
+                context,
+            )
+            result = await self.app.wait_agent(
+                extension.WaitAgentInput(agent_id=spawned["data"]["agent_id"], timeout_ms=1_000),
+                context,
+            )
+        self.assertEqual(result["data"]["status"], "failed")
+        self.assertIn("kodelet-sdk 0.5.2 or newer; update the SDK", result["content"])
+        self.assertFalse(FakeClient.instances[0].create_session_calls)
+
+    async def test_older_sdk_cannot_fork_child_without_parent(self) -> None:
+        context = self.context()
+
+        async def old_fork(_self: Any, name: str | None = None) -> str:
+            raise AssertionError("old fork API must not be called")
+
+        with mock.patch.object(runtime_module.ToolContext, "fork_conversation", old_fork):
+            result = await self.app.spawn_agent(
+                extension.SpawnAgentInput(name="old-sdk", task="inspect"), context
+            )
+        self.assertIn("kodelet-sdk 0.5.2 or newer; update the SDK", result["error"])
+        self.assertFalse(context.fork_names)
+        self.assertFalse(FakeClient.instances)
+
     async def test_fresh_runs_and_followups_disable_only_subagent_controls_with_inline_hook(
         self,
     ) -> None:
@@ -513,6 +544,10 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(completed["data"]["generation"], generation)
             options = FakeClient.instances[generation - 1].create_session_calls[0]
             self.assertEqual(options.get("resume"), conversation_id)
+            if generation == 1:
+                self.assertEqual(options["parent_conversation_id"], context.conversation_id)
+            else:
+                self.assertNotIn("parent_conversation_id", options)
             conversation_id = completed["data"]["conversation_id"]
             hooks = options["extensions"]
             assert isinstance(hooks, list)
@@ -612,12 +647,14 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(running.conversation_id, "child-owner-1-1")
         self.assertEqual(running.context_mode, "fork")
         self.assertEqual(context.fork_names, ["authentication-inspector"])
+        self.assertEqual(context.fork_as_child, [True])
         self.assertIn(running.conversation_id, forked["content"])
         self.assertEqual(
             FakeClient.instances[0].create_session_calls[0]["resume"],
             running.conversation_id,
         )
         self.assertNotIn("extensions", FakeClient.instances[0].create_session_calls[0])
+        self.assertNotIn("parent_conversation_id", FakeClient.instances[0].create_session_calls[0])
         self.assertEqual(FakeClient.instances[0].env[RECURSION_GUARD_ENV], "1")
         self.assertIn("1 active", context.ui.text(WIDGET_ID))
         self.assertIn("authentication-inspector", context.ui.text(WIDGET_ID))
@@ -666,6 +703,9 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fresh_result["content"], "result for independent review")
         fresh_client = FakeClient.instances[1]
         self.assertNotIn("resume", fresh_client.create_session_calls[0])
+        self.assertEqual(
+            fresh_client.create_session_calls[0]["parent_conversation_id"], context.conversation_id
+        )
         self.assertEqual(fresh_result["data"]["context_mode"], "fresh")
         self.assertEqual(len(context.background_leases), 2)
         fresh_lease = context.background_leases[1]

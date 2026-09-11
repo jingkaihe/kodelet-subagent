@@ -79,6 +79,8 @@ for line in sys.stdin:
         sys.exit(7)
     if method == "initialize":
         result = {"protocolVersion": 1, "_meta": {"steering": {"supported": True}}}
+        if mode != "no-hierarchy":
+            result["_meta"]["conversationHierarchy"] = {"version": 1}
         if mode != "no-extensions":
             result["_meta"]["sessionExtensions"] = {
                 "version": 2 if mode == "unsupported-extensions" else 1
@@ -333,6 +335,53 @@ async def test_fresh_recursion_guard_fails_closed_without_supported_acp_extensio
         await asyncio.wait_for(runtime.shutdown(), timeout=3)
 
 
+@pytest.mark.parametrize("resume", [False, True])
+@pytest.mark.parametrize("mode", ["normal", "no-hierarchy"])
+async def test_fresh_parent_relationship_is_sent_only_on_creation(
+    fake_acp: Path, mode: str, resume: bool
+) -> None:
+    requests_file = fake_acp.parent / "requests"
+
+    def factory(*, command: str, cwd: str, env: Mapping[str, str]) -> AgentClient:
+        return make_client(fake_acp, mode, ACP_TEST_REQUESTS=str(requests_file), **env)
+
+    runtime = RuntimeState(client_factory=factory)
+    store = AgentStore(fake_acp.parent / "agents.sqlite", runtime.runtime_id)
+    await store.initialize()
+    claim = await store.create("parent", "worker", "continue", str(fake_acp.parent), "fresh")
+    live = runtime.live_run_from_claim(claim, "continue", store)
+    if resume:
+        await store.attach_conversation(claim.lease, "saved-child")
+        live.conversation_id = "saved-child"
+    try:
+        runtime.launch_live_run(live)
+        assert live.runner_task is not None
+        await asyncio.wait_for(live.runner_task, timeout=3)
+        record = await store.get("parent", live.agent_id)
+        requests = [json.loads(line) for line in requests_file.read_text().splitlines()]
+        if mode == "no-hierarchy" and not resume:
+            assert record.run.status == "failed"
+            assert "conversationHierarchy version 1" in (record.run.error or "")
+            assert [request["method"] for request in requests] == ["initialize"]
+        else:
+            assert record.run.status == "completed"
+            session_request = requests[1]
+            assert session_request["method"] == ("session/load" if resume else "session/new")
+            metadata = session_request["params"]["_meta"]
+            assert metadata["sessionExtensions"] == {"version": 1, "extensionIds": ["inline-1"]}
+            if resume:
+                assert "conversationHierarchy" not in metadata
+            else:
+                assert metadata["conversationHierarchy"] == {
+                    "version": 1,
+                    "parentConversationId": "parent",
+                }
+        assert runtime.owned_runs == {}
+        assert_child_reaped(fake_acp.parent / "pid")
+    finally:
+        await asyncio.wait_for(runtime.shutdown(), timeout=3)
+
+
 @pytest.mark.parametrize("message_bytes", [0, 31])
 async def test_runtime_preserves_real_sdk_cancelled_stop_reason_and_partial_output(
     fake_acp: Path, message_bytes: int
@@ -372,6 +421,7 @@ class ACPContextHost:
 
     async def request(self, method: str, params: Any = None) -> Any:
         if method == "kodelet.conversation.fork":
+            assert params["asChild"] is True
             self.fork_names.append(params["name"])
             return {"conversationId": "named-child"}
         if method == "kodelet.runtime.background.acquire":
@@ -422,7 +472,7 @@ async def test_named_fork_streaming_steering_resume_and_cancel_use_real_sdk(fake
                 "extension": {"dataDir": str(directory / "data")},
                 "capabilities": {
                     "runtime": {"backgroundTasks": True},
-                    "conversations": {"fork": True},
+                    "conversations": {"fork": True, "hierarchy": True},
                     "toolUpdates": True,
                 },
             },
