@@ -1,6 +1,6 @@
 [project]
 name = "kodelet-subagent"
-version = "0.6.2"
+version = "0.6.3"
 description = "Durable background-agent extension for Kodelet"
 readme = "README.md"
 authors = [
