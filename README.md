@@ -19,6 +19,12 @@ Use `context_mode="fresh"` for another directory, subject to runner policy; fork
 
 The SDK handles messages up to 64 MiB each and owns transport cleanup. Background leases remain held until client cleanup finishes; `running` indicates ownership, not recent progress.
 
+## Model profiles
+
+Fresh agents inherit the parent's model profile. To override, set `KODELET_SUBAGENT_PROFILE=generic` in the environment of the runner hosting the extension and restart that runner. Unset or blank values restore inheritance; if neither provides a profile, none is passed.
+
+Setting this only on the control plane does not configure a separate runner. Forks and follow-ups retain the saved conversation settings.
+
 ## Installation
 
 Run the package's installer directly with `uvx`:

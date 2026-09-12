@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import sqlite3
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -53,6 +54,7 @@ CLIENT_CLOSE_RETRY_MAX_SECONDS = 2.0
 STEERING_POLL_SECONDS = 0.1
 STEERING_RETRY_SECONDS = 0.25
 RECURSION_GUARD_ENV = "KODELET_SUBAGENT_EXTENSION_CHILD"
+SUBAGENT_PROFILE_ENV = "KODELET_SUBAGENT_PROFILE"
 AGENT_TOOL_NAMES = (
     "spawn_agent",
     "wait_agent",
@@ -135,6 +137,7 @@ class LiveRun:
     lease: Lease = field(repr=False)
     progress: TaskProgress = field(repr=False)
     conversation_id: str | None = None
+    profile: str | None = None
     setup_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     runner_task: asyncio.Task[None] | None = field(default=None, repr=False)
     cleanup_task: asyncio.Task[None] | None = field(default=None, repr=False)
@@ -613,6 +616,8 @@ class RuntimeState:
             options["resume"] = conversation_id
         elif live.context_mode == "fresh":
             options["parent_conversation_id"] = live.owner_conversation_id
+            if live.profile is not None:
+                options["profile"] = live.profile
         if live.context_mode == "fresh":
             # Fresh conversations lack a persisted extension-fork initiator.
             # Reattach on every resume; ACP client env does not reach the runner.
@@ -903,6 +908,13 @@ class RuntimeState:
         self.setup_tasks.add(setup_task)
         try:
             live = self.live_run_from_claim(claim, task, store)
+            if live.conversation_id is None and live.context_mode == "fresh":
+                # Startup-only selection; saved settings belong to the daemon.
+                live.profile = (
+                    os.environ.get(SUBAGENT_PROFILE_ENV, "").strip()
+                    or (ctx.profile or "").strip()
+                    or None
+                )
             live.ui = getattr(ctx, "ui", None)
             self.own_live_setup(live, setup_task)
             setup_heartbeat = self.start_agent_heartbeat(live)

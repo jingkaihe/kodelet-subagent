@@ -37,6 +37,9 @@ if mode == "ignore-term":
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
 with open(os.environ["ACP_TEST_PID"], "w") as handle:
     handle.write(str(os.getpid()))
+if os.environ.get("ACP_TEST_ARGS"):
+    with open(os.environ["ACP_TEST_ARGS"], "w") as handle:
+        json.dump(sys.argv[1:], handle)
 
 def emit(message):
     with output_lock:
@@ -337,19 +340,28 @@ async def test_fresh_recursion_guard_fails_closed_without_supported_acp_extensio
 
 @pytest.mark.parametrize("resume", [False, True])
 @pytest.mark.parametrize("mode", ["normal", "no-hierarchy"])
-async def test_fresh_parent_relationship_is_sent_only_on_creation(
-    fake_acp: Path, mode: str, resume: bool
+@pytest.mark.parametrize("profile", [None, "reviewer", "default"])
+async def test_fresh_profile_and_parent_relationship_are_sent_only_on_creation(
+    fake_acp: Path, mode: str, resume: bool, profile: str | None
 ) -> None:
     requests_file = fake_acp.parent / "requests"
+    args_file = fake_acp.parent / "args"
 
     def factory(*, command: str, cwd: str, env: Mapping[str, str]) -> AgentClient:
-        return make_client(fake_acp, mode, ACP_TEST_REQUESTS=str(requests_file), **env)
+        return make_client(
+            fake_acp,
+            mode,
+            ACP_TEST_REQUESTS=str(requests_file),
+            ACP_TEST_ARGS=str(args_file),
+            **env,
+        )
 
     runtime = RuntimeState(client_factory=factory)
     store = AgentStore(fake_acp.parent / "agents.sqlite", runtime.runtime_id)
     await store.initialize()
     claim = await store.create("parent", "worker", "continue", str(fake_acp.parent), "fresh")
     live = runtime.live_run_from_claim(claim, "continue", store)
+    live.profile = profile
     if resume:
         await store.attach_conversation(claim.lease, "saved-child")
         live.conversation_id = "saved-child"
@@ -358,6 +370,10 @@ async def test_fresh_parent_relationship_is_sent_only_on_creation(
         assert live.runner_task is not None
         await asyncio.wait_for(live.runner_task, timeout=3)
         record = await store.get("parent", live.agent_id)
+        expected_args = ["acp"]
+        if profile is not None and not resume:
+            expected_args.append(f"--profile={profile}")
+        assert json.loads(args_file.read_text()) == expected_args
         requests = [json.loads(line) for line in requests_file.read_text().splitlines()]
         if mode == "no-hierarchy" and not resume:
             assert record.run.status == "failed"

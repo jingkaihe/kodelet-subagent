@@ -104,6 +104,7 @@ class FakeContext:
         data_dir: Path,
         *,
         invoked_by: str | None = None,
+        profile: str | None = None,
         block_fork: bool = False,
         block_background_acquire: bool = False,
         block_background_release: bool = False,
@@ -111,6 +112,7 @@ class FakeContext:
         self.conversation_id = conversation_id
         self.cwd = str(cwd)
         self.invoked_by = invoked_by
+        self.profile = profile
         self.storage = SimpleNamespace(data_dir=str(data_dir))
         self.ui = FakeUI()
         self.log = SimpleNamespace(warn=lambda _message, _fields=None: None)
@@ -318,7 +320,7 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
 
         self.environment_patch = mock.patch.dict(
             os.environ,
-            {extension.RECURSION_GUARD_ENV: "0"},
+            {extension.RECURSION_GUARD_ENV: "0", runtime_module.SUBAGENT_PROFILE_ENV: ""},
         )
         self.environment_patch.start()
         FakeClient.reset()
@@ -355,6 +357,7 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         *,
         data_dir: Path | None = None,
         invoked_by: str | None = None,
+        profile: str | None = None,
         block_fork: bool = False,
         block_background_acquire: bool = False,
         block_background_release: bool = False,
@@ -364,6 +367,7 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
             self.cwd,
             data_dir or self.data_dir,
             invoked_by=invoked_by,
+            profile=profile,
             block_fork=block_fork,
             block_background_acquire=block_background_acquire,
             block_background_release=block_background_release,
@@ -447,6 +451,10 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
             set(spawn_tool["inputSchema"]["required"]),
             {"name", "task"},
         )
+        self.assertEqual(
+            set(spawn_tool["inputSchema"]["properties"]),
+            {"name", "task", "cwd", "context_mode"},
+        )
 
         for capabilities in (
             {"runtime": {"backgroundTasks": False}},
@@ -483,10 +491,64 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.dict(os.environ, {RECURSION_GUARD_ENV: "1"}):
             self.assertTrue(extension.is_agent_child(self.context()))
 
+    async def test_fresh_profile_selection_precedence(self) -> None:
+        cases = [
+            ("parent", "parent-profile", None, "parent-profile"),
+            ("unnamed", None, None, None),
+            ("blank-profiles", "  ", "  ", None),
+            ("base", "default", None, "default"),
+            ("configured", "parent-profile", "configured-profile", "configured-profile"),
+            ("configured-base", "parent-profile", "default", "default"),
+            ("blank-env", "parent-profile", "  ", "parent-profile"),
+            ("trim-env", "parent-profile", " configured-profile ", "configured-profile"),
+        ]
+        for name, parent, configured, expected in cases:
+            with self.subTest(name=name), mock.patch.dict(os.environ):
+                if configured is None:
+                    os.environ.pop(runtime_module.SUBAGENT_PROFILE_ENV, None)
+                else:
+                    os.environ[runtime_module.SUBAGENT_PROFILE_ENV] = configured
+                context = self.context(profile=parent)
+                spawned = await self.app.spawn_agent(
+                    extension.SpawnAgentInput(name=name, task="inspect", context_mode="fresh"),
+                    context,
+                )
+                self.assertNotIn("error", spawned)
+                agent_id = spawned["data"]["agent_id"]
+                completed = await self.app.wait_agent(
+                    extension.WaitAgentInput(agent_id=agent_id, timeout_ms=1_000), context
+                )
+                self.assertEqual(completed["data"]["status"], "completed")
+                options = FakeClient.instances[-1].create_session_calls[0]
+                if expected is None:
+                    self.assertNotIn("profile", options)
+                else:
+                    self.assertEqual(options["profile"], expected)
+                self.assertNotIn("resume", options)
+
+    async def test_fork_ignores_configured_fresh_profile(self) -> None:
+        context = self.context(profile="parent-profile")
+        with mock.patch.dict(
+            os.environ, {runtime_module.SUBAGENT_PROFILE_ENV: "configured-profile"}
+        ):
+            spawned = await self.app.spawn_agent(
+                extension.SpawnAgentInput(name="forked", task="inspect"), context
+            )
+            self.assertNotIn("error", spawned)
+            completed = await self.app.wait_agent(
+                extension.WaitAgentInput(agent_id=spawned["data"]["agent_id"], timeout_ms=1_000),
+                context,
+            )
+        self.assertEqual(completed["data"]["status"], "completed")
+        options = FakeClient.instances[0].create_session_calls[0]
+        self.assertEqual(options["resume"], completed["data"]["conversation_id"])
+        self.assertNotIn("profile", options)
+        self.assertEqual(context.fork_names, ["forked"])
+
     async def test_fresh_runs_and_followups_disable_only_subagent_controls_with_inline_hook(
         self,
     ) -> None:
-        context = self.context(invoked_by="main")
+        context = self.context(invoked_by="main", profile="parent-profile")
         self.assertFalse(extension.is_agent_child(context))
         spawned = await self.app.spawn_agent(
             extension.SpawnAgentInput(name="fresh-guard", task="inspect", context_mode="fresh"),
@@ -504,6 +566,8 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         conversation_id: str | None = None
         for generation in (1, 2):
             if generation == 2:
+                context.profile = "changed-parent-profile"
+                os.environ[runtime_module.SUBAGENT_PROFILE_ENV] = "changed-configured-profile"
                 followed = await self.app.followup_agent(
                     extension.FollowupAgentInput(agent_id=agent_id, task="continue"), context
                 )
@@ -517,8 +581,10 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(options.get("resume"), conversation_id)
             if generation == 1:
                 self.assertEqual(options["parent_conversation_id"], context.conversation_id)
+                self.assertEqual(options["profile"], "parent-profile")
             else:
                 self.assertNotIn("parent_conversation_id", options)
+                self.assertNotIn("profile", options)
             conversation_id = completed["data"]["conversation_id"]
             hooks = options["extensions"]
             assert isinstance(hooks, list)
@@ -2351,7 +2417,7 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(shutdown, timeout=1)
 
     async def test_startup_timeout_is_persisted_as_failure(self) -> None:
-        context = self.context()
+        context = self.context(profile="parent-profile")
         FakeClient.block_startup = True
         with mock.patch.object(runtime_module, "AGENT_START_TIMEOUT_SECONDS", 0.02):
             spawned = await self.app.spawn_agent(
@@ -2378,6 +2444,29 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
 
         await wait_until(background_lease_closed)
         self.assertTrue(FakeClient.instances[0].closed)
+        self.assertEqual(
+            FakeClient.instances[0].create_session_calls[0]["profile"], "parent-profile"
+        )
+        self.assertIsNone(failed.conversation_id)
+
+        # Without a saved conversation, retry resolves the current defaults.
+        await self.runtime.shutdown()
+        self.runtime = RuntimeState(client_factory=FakeClient)
+        self.app = extension.SubagentApplication(self.runtime)
+        FakeClient.block_startup = False
+        context.profile = "changed-parent-profile"
+        with mock.patch.dict(os.environ, {runtime_module.SUBAGENT_PROFILE_ENV: "changed-profile"}):
+            followed = await self.app.followup_agent(
+                extension.FollowupAgentInput(agent_id=failed.id, task="retry startup"), context
+            )
+            self.assertNotIn("error", followed)
+            completed = await self.app.wait_agent(
+                extension.WaitAgentInput(agent_id=failed.id, timeout_ms=1_000), context
+            )
+        self.assertEqual(completed["data"]["status"], "completed")
+        options = FakeClient.instances[-1].create_session_calls[0]
+        self.assertNotIn("resume", options)
+        self.assertEqual(options["profile"], "changed-profile")
 
     async def test_background_lease_release_retries_transient_failures(self) -> None:
         context = self.context()

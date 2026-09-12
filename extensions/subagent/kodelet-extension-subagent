@@ -9,4 +9,4 @@ if [ -f "$repository_root/pyproject.toml" ] && [ -d "$repository_root/src/kodele
   exec uv run --project "$repository_root" --locked kodelet-extension-subagent "$@"
 fi
 
-exec uvx --from kodelet-subagent==0.6.3 kodelet-extension-subagent "$@"
+exec uvx --from kodelet-subagent==0.6.5 kodelet-extension-subagent "$@"

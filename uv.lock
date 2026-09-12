@@ -147,7 +147,7 @@ wheels = [
 
 [[package]]
 name = "kodelet-subagent"
-version = "0.6.3"
+version = "0.6.5"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
