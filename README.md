@@ -1,53 +1,39 @@
 # Kodelet subagent
 
-Durable background agents for Kodelet, implemented as a normal Python library and exposed through a Kodelet extension.
+A Kodelet extension for running named background agents that you can wait on, steer, cancel, and give follow-up work.
 
-The extension provides six tools:
+## Tools
 
-- `spawn_agent` starts a named background agent from a fork of the current conversation or from fresh context.
-- `wait_agent` waits for a specific run while forwarding live child-tool progress when available.
-- `list_agents` reports persisted agents owned by the current conversation.
-- `followup_agent` resumes a completed, failed, interrupted, or canceled agent.
-- `steer_agent` queues guidance for a running agent.
-- `cancel_agent` persists a durable `canceling` state, fences the active setup or worker, and preserves the agent for a later follow-up once cancellation finishes.
+| Tool | Purpose |
+| --- | --- |
+| `spawn_agent` | Start a named background agent and return immediately. |
+| `wait_agent` | Wait for an agent's current run, with live progress, and return its result. |
+| `list_agents` | List the current conversation's agents and their status. |
+| `followup_agent` | Give an idle, failed, interrupted, or canceled agent a new task. |
+| `steer_agent` | Send guidance to a running agent. |
+| `cancel_agent` | Cancel an agent. It can be resumed later with `followup_agent`. |
 
-Agent identity, run history, leases, and steering messages are stored in SQLite. The extension initializes and upgrades its database automatically before serving tools.
+By default, a new agent starts from a fork of the current conversation. Pass `context_mode="fresh"` to start without the parent's context. Only fresh agents can run in a different `cwd`, subject to runner policy. Forks and follow-ups keep their saved directory. Background agents cannot spawn agents of their own.
 
-Agents use the SDK's ACP client, keeping model credentials and history on the daemon. Named forks preserve agent titles; follow-ups reuse the conversation. TUI/Web UI streaming and late-waiter tool progress use normal SDK events.
-
-Use `context_mode="fresh"` for another directory, subject to runner policy; forks and resumes retain their saved cwd. Fresh agents require inline ACP extension support to disable recursive subagent controls while keeping `code_search` available.
-
-The SDK handles messages up to 64 MiB each and owns transport cleanup. Background leases remain held until client cleanup finishes; `running` indicates ownership, not recent progress.
+Agents are stored in SQLite, so an agent interrupted by an extension restart can still be resumed with `followup_agent`.
 
 ## Model profiles
 
-Fresh agents inherit the parent's model profile. To override, set `KODELET_SUBAGENT_PROFILE=generic` in the environment of the runner hosting the extension and restart that runner. Unset or blank values restore inheritance; if neither provides a profile, none is passed.
-
-Setting this only on the control plane does not configure a separate runner. Forks and follow-ups retain the saved conversation settings.
+Fresh agents use the parent conversation's model profile. To use a different profile, set `KODELET_SUBAGENT_PROFILE` (for example, `generic`) in the environment of the runner that hosts the extension, then restart that runner. Forked agents and follow-ups keep the conversation's saved settings.
 
 ## Installation
-
-Run the package's installer directly with `uvx`:
 
 ```bash
 uvx kodelet-subagent install
 ```
 
-Or install directly from GitHub:
+Or install from GitHub:
 
 ```bash
 uvx --from git+https://github.com/jingkaihe/kodelet-subagent kodelet-subagent install
 ```
 
-The GitHub form pins the resolved commit in the generated extension wrapper.
-
-This installs the extension wrapper at:
-
-```text
-~/.kodelet/plugins/jingkaihe@kodelet-subagent/extensions/subagent/kodelet-extension-subagent
-```
-
-Verify discovery in the selected runner's workspace:
+Verify that the runner discovers the extension:
 
 ```bash
 kodelet extension inspect jingkaihe@kodelet-subagent/subagent
