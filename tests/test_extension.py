@@ -2818,6 +2818,50 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         failed = await self.wait_for_status(store, context.conversation_id, agent_id, "failed")
         self.assertIn("transport unavailable", failed.run.error)
 
+    async def test_fork_cwd_rejects_different_directories_before_setup(self) -> None:
+        context = self.context()
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.cwd / "escape").symlink_to(outside, target_is_directory=True)
+        (self.cwd / "nested").mkdir()
+        for cwd in (str(outside), "../outside", "escape", "nested"):
+            with self.subTest(cwd=cwd):
+                result = await self.app.spawn_agent(
+                    extension.SpawnAgentInput(name="forked-agent", task="work", cwd=cwd),
+                    context,
+                )
+                self.assertEqual(
+                    result["error"],
+                    "spawn_agent failed: context_mode='fork' requires the current workspace cwd",
+                )
+        self.assertEqual(self.runtime.stores, {})
+        self.assertEqual(context.fork_names, [])
+        self.assertEqual(context.background_leases, [])
+        self.assertEqual(FakeClient.instances, [])
+
+    async def test_fork_cwd_accepts_paths_resolving_to_current_workspace(self) -> None:
+        context = self.context()
+        alias = self.root / "workspace-alias"
+        alias.symlink_to(self.cwd, target_is_directory=True)
+        for cwd in (None, str(self.cwd), ".", "../workspace", str(alias)):
+            with self.subTest(cwd=cwd):
+                result = await self.app.spawn_agent(
+                    extension.SpawnAgentInput(
+                        name=f"forked-agent-{len(FakeClient.instances)}", task="work", cwd=cwd
+                    ),
+                    context,
+                )
+                self.assertNotIn("error", result)
+                completed = await self.app.wait_agent(
+                    extension.WaitAgentInput(agent_id=result["data"]["agent_id"], timeout_ms=1_000),
+                    context,
+                )
+                self.assertEqual(completed["content"], "result for work")
+                self.assertEqual(
+                    FakeClient.instances[-1].create_session_calls[0]["cwd"], str(self.cwd)
+                )
+                self.assertIn("resume", FakeClient.instances[-1].create_session_calls[0])
+
     async def test_fresh_cwd_accepts_absolute_relative_and_symlink_sibling_directories(
         self,
     ) -> None:

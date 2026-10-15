@@ -48,8 +48,8 @@ SPAWN_AGENT_DESCRIPTION = textwrap.dedent(
     Start a named Kodelet agent in the background and return immediately. Names
     must contain one to three lowercase kebab-case words and be unique. By default,
     the agent inherits the current conversation; set context_mode to fresh to start
-    without it. Use followup_agent to wake an idle, failed, interrupted, or canceled
-    agent.
+    without it. Fork mode requires cwd to match the current working directory.
+    Use followup_agent to wake an idle, failed, interrupted, or canceled agent.
     """
 ).strip()
 
@@ -122,7 +122,8 @@ class SpawnAgentInput(BaseModel):
         default=None,
         description=(
             "Optional directory for the agent. Defaults to the current workspace "
-            "directory. Relative paths are resolved against the current workspace."
+            "directory. Relative paths are resolved against the current workspace. "
+            "context_mode='fork' requires cwd to match the current working directory."
         ),
     )
     context_mode: SpawnContextMode = Field(
@@ -216,7 +217,9 @@ def is_agent_child(ctx: ToolContext | EventContext) -> bool:
     return bool(invoked_by and invoked_by != "main")
 
 
-def resolve_agent_cwd(raw_cwd: str | None, workspace_cwd: str) -> Path:
+def resolve_agent_cwd(
+    raw_cwd: str | None, workspace_cwd: str, *, context_mode: SpawnContextMode
+) -> Path:
     workspace = Path(workspace_cwd).resolve()
     if raw_cwd is None:
         return workspace
@@ -230,6 +233,8 @@ def resolve_agent_cwd(raw_cwd: str | None, workspace_cwd: str) -> Path:
         raise ValueError(f"cwd does not exist: {resolved}")
     if not resolved.is_dir():
         raise ValueError(f"cwd is not a directory: {resolved}")
+    if context_mode == "fork" and resolved != workspace:
+        raise ValueError("context_mode='fork' requires the current workspace cwd")
     return resolved
 
 
@@ -386,7 +391,7 @@ class SubagentApplication:
             )
         try:
             owner_id = owner_conversation_id(ctx)
-            agent_cwd = resolve_agent_cwd(input.cwd, ctx.cwd)
+            agent_cwd = resolve_agent_cwd(input.cwd, ctx.cwd, context_mode=input.context_mode)
             store = await self.runtime.store_for_context(ctx)
             claim = await self.runtime.reserve_claim(
                 store.create(
