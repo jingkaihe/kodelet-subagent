@@ -36,7 +36,9 @@ from .persistence import (
     AgentConflictError,
     AgentNotFoundError,
     AgentRecord,
+    AgentStatus,
     AgentStore,
+    RunStatus,
     SpawnContextMode,
     validate_agent_name,
 )
@@ -186,6 +188,40 @@ class CancelAgentInput(BaseModel):
     )
 
 
+class AgentOutput(BaseModel):
+    """An agent and its current run, with results included by wait_agent."""
+
+    agent_id: str
+    name: str
+    run_id: str
+    generation: int
+    conversation_id: str | None
+    status: RunStatus
+    agent_status: AgentStatus
+    task: str
+    cwd: str
+    context_mode: SpawnContextMode
+    created_at: str
+    started_at: str | None
+    completed_at: str | None
+    updated_at: str
+    error: str | None = None
+    result: str | None = None
+    partial_result: str | None = None
+
+
+class ListAgentsOutput(BaseModel):
+    agents: list[AgentOutput]
+
+
+class SteerAgentOutput(BaseModel):
+    agent_id: str
+    name: str
+    message: str
+    accepted: bool
+    alreadyPending: bool
+
+
 class SubagentExtension(Extension):
     """Extension host with capability gating tied to one runtime state."""
 
@@ -255,7 +291,28 @@ def tool_error(message: str, *, summary: str) -> ToolExecutionResult:
         "content": message,
         "error": message,
         "data": {"presentation": tool_presentation(summary)},
+        "structuredContent": None,
     }
+
+
+def tool_result(
+    content: str,
+    data: dict[str, object],
+    *,
+    error: str | None = None,
+) -> ToolExecutionResult:
+    """Expose machine data separately while preserving the legacy result metadata."""
+
+    result: ToolExecutionResult = {
+        "content": content,
+        "data": data,
+        "structuredContent": {
+            key: value for key, value in data.items() if key not in {"presentation", "taskRun"}
+        },
+    }
+    if error is not None:
+        result["error"] = error
+    return result
 
 
 def tool_presentation(summary: str, *, body: str | None = None) -> ToolPresentation:
@@ -305,36 +362,42 @@ class SubagentApplication:
             "spawn_agent",
             description=SPAWN_AGENT_DESCRIPTION,
             input_schema=SpawnAgentInput,
+            output_schema=AgentOutput.model_json_schema(),
             timeout_in_sec=SPAWN_TOOL_TIMEOUT_SECONDS,
         )(self.spawn_agent)
         self.extension.tool(
             "wait_agent",
             description=WAIT_AGENT_DESCRIPTION,
             input_schema=WaitAgentInput,
+            output_schema=AgentOutput.model_json_schema(),
             timeout_in_sec=WAIT_TOOL_TIMEOUT_SECONDS,
         )(self.wait_agent)
         self.extension.tool(
             "list_agents",
             description=LIST_AGENTS_DESCRIPTION,
             input_schema=ListAgentsInput,
+            output_schema=ListAgentsOutput.model_json_schema(),
             timeout_in_sec=10,
         )(self.list_agents)
         self.extension.tool(
             "followup_agent",
             description=FOLLOWUP_AGENT_DESCRIPTION,
             input_schema=FollowupAgentInput,
+            output_schema=AgentOutput.model_json_schema(),
             timeout_in_sec=FOLLOWUP_TOOL_TIMEOUT_SECONDS,
         )(self.followup_agent)
         self.extension.tool(
             "steer_agent",
             description=STEER_AGENT_DESCRIPTION,
             input_schema=SteerAgentInput,
+            output_schema=SteerAgentOutput.model_json_schema(),
             timeout_in_sec=STEER_TOOL_TIMEOUT_SECONDS,
         )(self.steer_agent)
         self.extension.tool(
             "cancel_agent",
             description=CANCEL_AGENT_DESCRIPTION,
             input_schema=CancelAgentInput,
+            output_schema=AgentOutput.model_json_schema(),
             timeout_in_sec=CANCEL_TOOL_TIMEOUT_SECONDS,
         )(self.cancel_agent)
 
@@ -424,14 +487,14 @@ class SubagentApplication:
         )
         snapshot = public_snapshot(claim.agent)
         snapshot["presentation"] = tool_presentation(summary, body=task)
-        return {
-            "content": (
+        return tool_result(
+            (
                 f"Spawned agent {claim.agent.name!r} ({live.agent_id})"
                 f"{conversation_detail}. Continue with independent work and call "
                 "wait_agent before relying on its result."
             ),
-            "data": snapshot,
-        }
+            snapshot,
+        )
 
     async def wait_agent(
         self,
@@ -526,15 +589,12 @@ class SubagentApplication:
         snapshot: dict[str, object],
     ) -> ToolExecutionResult:
         if agent.run.status in ACTIVE_RUN_STATUSES:
-            return {
-                "content": f"Agent {agent.name!r} is still {agent.run.status}.",
-                "data": snapshot,
-            }
+            return tool_result(f"Agent {agent.name!r} is still {agent.run.status}.", snapshot)
         if agent.run.status == "completed":
-            return {"content": agent.run.result or "", "data": snapshot}
+            return tool_result(agent.run.result or "", snapshot)
         if agent.run.status == "failed":
             message = f"Agent {agent.name!r} failed: {agent.run.error or 'unknown error'}"
-            return {"content": message, "error": message, "data": snapshot}
+            return tool_result(message, snapshot, error=message)
         if agent.run.status == "interrupted":
             message = (
                 f"Agent {agent.name!r} was interrupted: "
@@ -543,19 +603,18 @@ class SubagentApplication:
             content = message
             if agent.run.result:
                 content += f"\n\nPartial output (agent did not complete):\n{agent.run.result}"
-            return {"content": content, "error": message, "data": snapshot}
+            return tool_result(content, snapshot, error=message)
         if agent.status == "canceling":
-            return {
-                "content": (
+            return tool_result(
+                (
                     f"Agent {agent.name!r} is still canceling. "
                     "Retry followup_agent after cancellation finishes."
                 ),
-                "data": snapshot,
-            }
-        return {
-            "content": (f"Agent {agent.name!r} was canceled. Use followup_agent to resume it."),
-            "data": snapshot,
-        }
+                snapshot,
+            )
+        return tool_result(
+            f"Agent {agent.name!r} was canceled. Use followup_agent to resume it.", snapshot
+        )
 
     async def list_agents(
         self,
@@ -573,13 +632,13 @@ class SubagentApplication:
         except Exception as exc:
             return tool_error(f"list_agents failed: {exc}", summary=summary)
         if not agents:
-            return {
-                "content": "No background agents have been spawned by this conversation.",
-                "data": {
+            return tool_result(
+                "No background agents have been spawned by this conversation.",
+                {
                     "agents": [],
                     "presentation": agent_list_presentation(agents),
                 },
-            }
+            )
         lines = [
             "Background agents:",
             "Name\tAgent ID\tConversation ID\tAgent state\tRun state\tTask",
@@ -593,13 +652,13 @@ class SubagentApplication:
                 f"{agent.name}\t{agent.id}\t{conversation_id}\t{agent.status}\t"
                 f"{agent.run.status}\t{task}"
             )
-        return {
-            "content": "\n".join(lines),
-            "data": {
+        return tool_result(
+            "\n".join(lines),
+            {
                 "agents": [public_snapshot(agent) for agent in agents],
                 "presentation": agent_list_presentation(agents),
             },
-        }
+        )
 
     async def followup_agent(
         self,
@@ -653,15 +712,15 @@ class SubagentApplication:
             summary,
             body=task,
         )
-        return {
-            "content": (
+        return tool_result(
+            (
                 f"Started follow-up run {live.run_id} for agent "
                 f"{claim.agent.name!r} ({live.agent_id}){conversation_detail}\n\n"
                 f"Follow-up task sent:\n{task}\n\n"
                 "Call wait_agent before relying on its result."
             ),
-            "data": snapshot,
-        }
+            snapshot,
+        )
 
     async def steer_agent(
         self,
@@ -688,12 +747,12 @@ class SubagentApplication:
         except Exception as exc:
             return tool_error(f"steer_agent failed: {exc}", summary=summary)
         queued = " behind pending steering" if result["alreadyPending"] else ""
-        return {
-            "content": (
+        return tool_result(
+            (
                 f"Queued steering for agent {agent.name!r} ({agent.id}){queued}.\n\n"
                 f"Steering message queued for delivery:\n{message}"
             ),
-            "data": {
+            {
                 "agent_id": agent.id,
                 "name": agent.name,
                 "message": message,
@@ -703,7 +762,7 @@ class SubagentApplication:
                 ),
                 **result,
             },
-        }
+        )
 
     async def cancel_agent(
         self,
@@ -740,13 +799,13 @@ class SubagentApplication:
                 summary,
                 body="Cancellation was recorded; the agent has since changed generation.",
             )
-            return {
-                "content": (
+            return tool_result(
+                (
                     f"Recorded cancellation for agent {agent.name!r}; "
                     "the agent has since changed generation."
                 ),
-                "data": snapshot,
-            }
+                snapshot,
+            )
         if agent.status == "canceling":
             snapshot["presentation"] = tool_presentation(
                 summary,
@@ -755,14 +814,14 @@ class SubagentApplication:
                     "Retry followup_agent after cleanup completes."
                 ),
             )
-            return {
-                "content": (
+            return tool_result(
+                (
                     f"Cancellation persisted for agent {agent.name!r}; "
                     "worker cleanup is still finishing. Retry followup_agent after "
                     "cleanup completes."
                 ),
-                "data": snapshot,
-            }
+                snapshot,
+            )
         if not cleanup_complete:
             snapshot["presentation"] = tool_presentation(
                 summary,
@@ -770,21 +829,20 @@ class SubagentApplication:
                     "Canceled and resumable. Remaining local resource cleanup is still finishing."
                 ),
             )
-            return {
-                "content": (
+            return tool_result(
+                (
                     f"Canceled agent {agent.name!r}; it can now be resumed with "
                     "followup_agent while remaining local resource cleanup finishes."
                 ),
-                "data": snapshot,
-            }
+                snapshot,
+            )
         snapshot["presentation"] = tool_presentation(
             summary,
             body="Canceled. Use followup_agent to resume this agent later.",
         )
-        return {
-            "content": (f"Canceled agent {agent.name!r}. Use followup_agent to resume it later."),
-            "data": snapshot,
-        }
+        return tool_result(
+            f"Canceled agent {agent.name!r}. Use followup_agent to resume it later.", snapshot
+        )
 
 
 application = SubagentApplication()
@@ -805,12 +863,15 @@ cancel_agent = application.cancel_agent
 __all__ = [
     "AGENT_TOOL_NAMES",
     "RECURSION_GUARD_ENV",
+    "AgentOutput",
     "CancelAgentInput",
     "FollowupAgentInput",
     "ListAgentsInput",
+    "ListAgentsOutput",
     "RuntimeState",
     "SpawnAgentInput",
     "SteerAgentInput",
+    "SteerAgentOutput",
     "SubagentApplication",
     "SubagentExtension",
     "WaitAgentInput",

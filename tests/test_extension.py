@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 from unittest import mock
 
-from kodelet_sdk import create_test_harness
+from kodelet_sdk import BaseModel, ExtensionTestHarness, create_test_harness
 
 import kodelet_subagent.extension as extension
 import kodelet_subagent.runtime as runtime_module
@@ -409,6 +409,155 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
             ).fetchall()
         return [(str(row[0]), int(row[1]), str(row[2])) for row in rows]
 
+    async def sdk_harness(self) -> ExtensionTestHarness:
+        harness = await create_test_harness(self.ext)
+        harness.initialize(
+            {
+                "extension": {
+                    "cwd": str(self.cwd),
+                    "dataDir": str(self.data_dir),
+                },
+                "capabilities": {"runtime": {"backgroundTasks": True}},
+            }
+        )
+        return harness
+
+    def assert_structured_result(self, result: dict[str, Any], model: type[BaseModel]) -> None:
+        payload = result["structuredContent"]
+        validated = model.model_validate(payload, strict=True)
+        self.assertEqual(validated.model_dump(exclude_unset=True), payload)
+        self.assertNotIn("presentation", payload)
+        self.assertNotIn("taskRun", payload)
+        self.assertIn("presentation", result["data"])
+        self.assertEqual(
+            validated.model_dump(exclude_unset=True, exclude_none=True),
+            {
+                key: value
+                for key, value in result["data"].items()
+                if key not in {"presentation", "taskRun"}
+            },
+        )
+
+    async def test_sdk_structured_results_across_agent_lifecycle(self) -> None:
+        harness = await self.sdk_harness()
+        FakeClient.block_startup = True
+        FakeClient.block_runs = True
+
+        async def execute(name: str, input: dict[str, Any]) -> dict[str, Any]:
+            result = await harness.execute_tool(
+                {"name": name, "input": input, "context": {"conversationId": "owner-1"}}
+            )
+            self.assertNotIn("error", result)
+            model = {
+                "list_agents": extension.ListAgentsOutput,
+                "steer_agent": extension.SteerAgentOutput,
+            }.get(name, extension.AgentOutput)
+            self.assert_structured_result(result, model)
+            return result
+
+        empty = await execute("list_agents", {})
+        self.assertEqual(empty["structuredContent"], {"agents": []})
+        spawned = await execute(
+            "spawn_agent",
+            {"name": "sdk-worker", "task": "first task", "context_mode": "fresh"},
+        )
+        payload = spawned["structuredContent"]
+        agent_id = payload["agent_id"]
+        self.assertEqual(payload["status"], "starting")
+        for field in ("conversation_id", "started_at", "completed_at"):
+            self.assertIsNone(payload[field])
+        listed = await execute("list_agents", {})
+        self.assertEqual(listed["structuredContent"], {"agents": [payload]})
+
+        FakeClient.startup_release.set()
+        await asyncio.wait_for(FakeClient.run_started.wait(), timeout=1)
+        running = await execute("wait_agent", {"agent_id": agent_id, "timeout_ms": 1})
+        self.assertEqual(running["structuredContent"]["status"], "running")
+        self.assertIn("taskRun", running["data"])
+        steered = await execute("steer_agent", {"agent_id": agent_id, "message": "focus here"})
+        self.assertEqual(
+            steered["structuredContent"],
+            {
+                "agent_id": agent_id,
+                "name": "sdk-worker",
+                "message": "focus here",
+                "accepted": True,
+                "alreadyPending": False,
+            },
+        )
+        canceled = await execute("cancel_agent", {"agent_id": agent_id})
+        self.assertEqual(canceled["structuredContent"]["agent_status"], "canceled")
+        followed = await execute("followup_agent", {"agent_id": agent_id, "task": "next task"})
+        self.assertEqual(followed["structuredContent"]["generation"], 2)
+        FakeClient.run_release.set()
+        completed = await execute("wait_agent", {"agent_id": agent_id, "timeout_ms": 1_000})
+        self.assertEqual(completed["structuredContent"]["status"], "completed")
+        self.assertEqual(completed["structuredContent"]["result"], "result for next task")
+        self.assertEqual(completed["content"], "result for next task")
+        self.assertNotIn("partial_result", completed["structuredContent"])
+
+    async def test_sdk_wait_preserves_terminal_snapshots_and_partial_results(self) -> None:
+        harness = await self.sdk_harness()
+        store = await self.runtime.store_for_context(self.context())
+        for status in ("failed", "interrupted", "canceling", "canceled"):
+            with self.subTest(status=status):
+                claim = await store.create("owner-1", status, "inspect", str(self.cwd), "fresh")
+                await store.mark_running(claim.lease, f"child-{status}")
+                if status in ("failed", "interrupted"):
+                    await store.terminal(
+                        claim.lease,
+                        status,
+                        error="worker stopped",
+                        result="partial answer",
+                    )
+                else:
+                    await store.cancel("owner-1", claim.agent.id)
+                    if status == "canceled":
+                        await store.complete_cancel(claim.lease)
+                result = await harness.execute_tool(
+                    {
+                        "name": "wait_agent",
+                        "input": {"agent_id": claim.agent.id, "timeout_ms": 0},
+                        "context": {"conversationId": "owner-1"},
+                    }
+                )
+                self.assert_structured_result(result, extension.AgentOutput)
+                payload = result["structuredContent"]
+                self.assertEqual(payload["agent_status"], status)
+                self.assertNotIn("result", payload)
+                if status in ("failed", "interrupted"):
+                    self.assertIn("worker stopped", result["error"])
+                    self.assertEqual(payload["partial_result"], "partial answer")
+                    self.assertEqual(payload["error"], "worker stopped")
+                else:
+                    self.assertNotIn("error", result)
+                    self.assertNotIn("partial_result", payload)
+                if status == "interrupted":
+                    self.assertIn("Partial output (agent did not complete)", result["content"])
+
+    async def test_sdk_tool_errors_have_null_structured_content(self) -> None:
+        harness = await self.sdk_harness()
+        for name, input in (
+            ("spawn_agent", {"name": "sdk-worker", "task": " "}),
+            ("wait_agent", {"agent_id": "missing"}),
+            ("list_agents", {}),
+            ("followup_agent", {"agent_id": "missing", "task": "retry"}),
+            ("steer_agent", {"agent_id": "missing", "message": "focus"}),
+            ("cancel_agent", {"agent_id": "missing"}),
+        ):
+            with self.subTest(tool=name):
+                result = await harness.execute_tool(
+                    {
+                        "name": name,
+                        "input": input,
+                        "context": {"conversationId": "" if name == "list_agents" else "owner-1"},
+                    }
+                )
+                self.assertTrue(result["error"])
+                self.assertEqual(result["content"], result["error"])
+                self.assertIsNone(result["structuredContent"])
+                self.assertEqual(set(result["data"]), {"presentation"})
+
     async def test_application_instances_own_isolated_runtime_state(self) -> None:
         other_runtime = RuntimeState(client_factory=FakeClient)
         other_application = extension.SubagentApplication(other_runtime)
@@ -441,6 +590,16 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
             {tool["name"] for tool in enabled["tools"]},
             set(extension.AGENT_TOOL_NAMES),
         )
+        output_models = {
+            "spawn_agent": extension.AgentOutput,
+            "wait_agent": extension.AgentOutput,
+            "list_agents": extension.ListAgentsOutput,
+            "followup_agent": extension.AgentOutput,
+            "steer_agent": extension.SteerAgentOutput,
+            "cancel_agent": extension.AgentOutput,
+        }
+        for tool in enabled["tools"]:
+            self.assertEqual(tool["outputSchema"], output_models[tool["name"]].model_json_schema())
         wait_tool = next(tool for tool in enabled["tools"] if tool["name"] == "wait_agent")
         self.assertEqual(
             set(wait_tool["inputSchema"]["properties"]),
