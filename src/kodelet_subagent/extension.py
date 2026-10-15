@@ -372,11 +372,16 @@ class SubagentApplication:
             output_schema=AgentOutput.model_json_schema(),
             timeout_in_sec=WAIT_TOOL_TIMEOUT_SECONDS,
         )(self.wait_agent)
+        list_output_schema = ListAgentsOutput.model_json_schema()
+        # Kodelet's declaration generator does not resolve local JSON Schema references.
+        list_output_schema["properties"]["agents"]["items"] = list_output_schema.pop("$defs")[
+            "AgentOutput"
+        ]
         self.extension.tool(
             "list_agents",
             description=LIST_AGENTS_DESCRIPTION,
             input_schema=ListAgentsInput,
-            output_schema=ListAgentsOutput.model_json_schema(),
+            output_schema=list_output_schema,
             timeout_in_sec=10,
         )(self.list_agents)
         self.extension.tool(

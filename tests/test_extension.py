@@ -593,13 +593,23 @@ class SubagentExtensionTest(unittest.IsolatedAsyncioTestCase):
         output_models = {
             "spawn_agent": extension.AgentOutput,
             "wait_agent": extension.AgentOutput,
-            "list_agents": extension.ListAgentsOutput,
             "followup_agent": extension.AgentOutput,
             "steer_agent": extension.SteerAgentOutput,
             "cancel_agent": extension.AgentOutput,
         }
         for tool in enabled["tools"]:
-            self.assertEqual(tool["outputSchema"], output_models[tool["name"]].model_json_schema())
+            if tool["name"] != "list_agents":
+                self.assertEqual(
+                    tool["outputSchema"], output_models[tool["name"]].model_json_schema()
+                )
+        list_tool = next(tool for tool in enabled["tools"] if tool["name"] == "list_agents")
+        list_schema = list_tool["outputSchema"]
+        expected_list_schema = extension.ListAgentsOutput.model_json_schema()
+        expected_list_schema.pop("$defs")
+        expected_list_schema["properties"]["agents"]["items"] = (
+            extension.AgentOutput.model_json_schema()
+        )
+        self.assertEqual(list_schema, expected_list_schema)
         wait_tool = next(tool for tool in enabled["tools"] if tool["name"] == "wait_agent")
         self.assertEqual(
             set(wait_tool["inputSchema"]["properties"]),
