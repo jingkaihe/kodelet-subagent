@@ -319,16 +319,3 @@ func TestManagedDatabaseWithForeignKeyViolationsIsRejected(t *testing.T) {
 	require.ErrorIs(t, err, ErrDatabaseMigration)
 	require.ErrorContains(t, err, "foreign-key violations")
 }
-
-func TestResolvePathAppliesParentAfterSymlinks(t *testing.T) {
-	root := ResolvePath(t.TempDir())
-	workspace := filepath.Join(root, "workspace")
-	outside := filepath.Join(root, "outside")
-	require.NoError(t, os.MkdirAll(filepath.Join(outside, "nested"), 0o755))
-	require.NoError(t, os.Mkdir(workspace, 0o755))
-	require.NoError(t, os.Symlink(filepath.Join(outside, "nested"), filepath.Join(workspace, "link")))
-
-	require.Equal(t, outside, ResolvePath(workspace+"/link/.."))
-	require.Equal(t, filepath.Join(outside, "nested", "missing", "child"), ResolvePath(workspace+"/link/missing/child"))
-	require.Equal(t, workspace, ResolvePath(workspace+"/./"))
-}

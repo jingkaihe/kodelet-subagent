@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jingkaihe/kodelet-subagent/internal/paths"
+
 	"github.com/jingkaihe/kodelet-subagent/internal/types"
 
 	"github.com/stretchr/testify/require"
@@ -57,7 +59,7 @@ func steeringRows(t *testing.T, path string) [][3]any {
 }
 
 func TestStoreResolvesRelativeDatabasePathAtConstruction(t *testing.T) {
-	root := ResolvePath(t.TempDir())
+	root := paths.Resolve(t.TempDir())
 	original := filepath.Join(root, "original")
 	later := filepath.Join(root, "later")
 	require.NoError(t, os.Mkdir(original, 0o755))

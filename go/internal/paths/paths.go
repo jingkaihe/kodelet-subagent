@@ -1,4 +1,6 @@
-package db
+// Package paths resolves user-supplied filesystem paths the way the original
+// Python extension did: symlinks are resolved before ".." is applied.
+package paths
 
 import (
 	"os"
@@ -20,10 +22,10 @@ func ExpandUser(path string) string {
 	return filepath.Join(home, strings.TrimPrefix(path, "~"))
 }
 
-// ResolvePath returns an absolute path with symlinks resolved as far as the
+// Resolve returns an absolute path with symlinks resolved as far as the
 // path exists. Unlike filepath.Clean, ".." applies to the resolved parent, and
 // missing trailing components are appended without requiring them to exist.
-func ResolvePath(path string) string {
+func Resolve(path string) string {
 	if !filepath.IsAbs(path) {
 		if cwd, err := os.Getwd(); err == nil {
 			path = cwd + string(filepath.Separator) + path

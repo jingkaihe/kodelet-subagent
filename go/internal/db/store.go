@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jingkaihe/kodelet-subagent/internal/paths"
+
 	"github.com/jingkaihe/kodelet-subagent/internal/types"
 
 	"github.com/jmoiron/sqlx"
@@ -57,7 +59,7 @@ func NewStore(path, runtimeID string, clock Clock) *Store {
 	if clock == nil {
 		clock = SystemClock
 	}
-	return &Store{path: ResolvePath(ExpandUser(path)), runtimeID: runtimeID, clock: clock}
+	return &Store{path: paths.Resolve(paths.ExpandUser(path)), runtimeID: runtimeID, clock: clock}
 }
 
 // Path returns the resolved database path.

@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/jingkaihe/kodelet-subagent/internal/paths"
+
 	"github.com/jmoiron/sqlx"
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 )
@@ -28,7 +30,7 @@ const HeadRevision = "0002_canceling_state"
 // versionTableSQL matches the table Alembic created for pre-Go databases, so
 // alembic_version remains the sole schema-version authority.
 const versionTableSQL = `CREATE TABLE alembic_version (
-	version_num VARCHAR(32) NOT NULL, 
+	version_num VARCHAR(32) NOT NULL,
 	CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
 )`
 
@@ -100,7 +102,7 @@ func Open(path string) (*sqlx.DB, error) {
 // Migrate creates or upgrades a subagent database to HeadRevision.
 // Non-empty databases without version metadata are rejected, not adopted.
 func Migrate(path string) error {
-	resolved := ResolvePath(ExpandUser(path))
+	resolved := paths.Resolve(paths.ExpandUser(path))
 	if err := os.MkdirAll(filepath.Dir(resolved), 0o755); err != nil {
 		return err
 	}
