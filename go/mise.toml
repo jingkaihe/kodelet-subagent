@@ -1,0 +1,64 @@
+[tools]
+go = "1.27.3"
+gofumpt = "0.12.0"
+golangci-lint = "2.15.0"
+goreleaser = "2.19.0"
+
+[tasks.fmt]
+description = "Format Go sources with gofumpt and goimports"
+run = "golangci-lint fmt"
+
+[tasks."fmt:check"]
+description = "Fail when Go sources need formatting"
+run = "golangci-lint fmt --diff"
+
+[tasks.whitespace]
+description = "Fail when any file has trailing whitespace"
+run = """
+if grep -rnIE '[[:blank:]]+$' --exclude-dir=bin --exclude-dir=dist .; then
+  echo 'trailing whitespace found' >&2
+  exit 1
+fi
+"""
+
+[tasks.tidy]
+description = "Tidy go.mod and go.sum"
+run = "go mod tidy"
+
+[tasks."tidy:check"]
+description = "Fail when go.mod or go.sum is untidy"
+run = "go mod tidy -diff"
+
+[tasks.lint]
+description = "Run golangci-lint"
+run = "golangci-lint run ./..."
+
+[tasks.test]
+description = "Run tests with the race detector"
+env = { CGO_ENABLED = "1" }
+run = "go test -race ./..."
+
+[tasks.build]
+description = "Build the extension binary into bin/"
+env = { CGO_ENABLED = "0" }
+run = "go build -trimpath -o bin/kodelet-extension-subagent ./cmd/kodelet-extension-subagent"
+
+[tasks."release:check"]
+description = "Validate the GoReleaser configuration"
+run = "goreleaser check"
+
+[tasks.snapshot]
+description = "Cross-compile unpublished release archives into dist/"
+run = "goreleaser release --snapshot --clean"
+
+[tasks.check]
+description = "Run every check required before merging"
+depends = ["fmt:check", "whitespace", "tidy:check", "lint", "test", "build", "release:check"]
+
+[tasks.version]
+description = "Print the extension version"
+run = "cat internal/version/VERSION"
+
+[tasks.clean]
+description = "Remove build outputs"
+run = "rm -rf bin dist"

@@ -1,0 +1,38 @@
+version: 2
+
+project_name: kodelet-subagent
+
+builds:
+  - id: kodelet-extension-subagent
+    main: ./cmd/kodelet-extension-subagent
+    binary: kodelet-extension-subagent
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+# Publish bare executables, matching Kodelet's native extension assets, so a
+# download can be placed on PATH as kodelet-extension-subagent directly.
+archives:
+  - formats:
+      - binary
+    name_template: "{{ .Binary }}-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  use: git
+  sort: asc
