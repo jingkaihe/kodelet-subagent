@@ -1,6 +1,6 @@
 # Kodelet subagent
 
-A Kodelet extension for running named background agents that you can wait on, steer, cancel, and give follow-up work.
+A Kodelet extension for running named background agents that you can wait on, steer, cancel, and give follow-up work. It ships as a single static executable, `kodelet-extension-subagent`.
 
 ## Tools
 
@@ -17,27 +17,70 @@ By default, a new agent starts from a fork of the current conversation. Pass `co
 
 Agents are stored in SQLite, so an agent interrupted by an extension restart can still be resumed with `followup_agent`.
 
+## Installation
+
+Kodelet discovers executables named `kodelet-extension-*` on the runner's `PATH`, so installing the binary into a `PATH` directory is all that is needed. Download the build for your platform from the [releases page](https://github.com/jingkaihe/kodelet-subagent/releases):
+
+```bash
+os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+arch="$(uname -m)"
+case "$arch" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; esac
+mkdir -p ~/.local/bin
+curl -fsSL -o ~/.local/bin/kodelet-extension-subagent \
+  "https://github.com/jingkaihe/kodelet-subagent/releases/latest/download/kodelet-extension-subagent-${os}-${arch}"
+chmod +x ~/.local/bin/kodelet-extension-subagent
+```
+
+Builds are published for Linux and macOS on amd64 and arm64, alongside a `checksums.txt` file. With Go installed, you can instead build it into `$(go env GOPATH)/bin`, which must then be on the runner's `PATH`:
+
+```bash
+go install github.com/jingkaihe/kodelet-subagent/cmd/kodelet-extension-subagent@latest
+```
+
+Restart the runner after installing, then verify that it discovers the extension:
+
+```bash
+kodelet extension inspect subagent
+```
+
+## Upgrading from the Python package
+
+Releases up to 0.6.7 were a Python package on PyPI, which is no longer updated. It was installed as the `jingkaihe@kodelet-subagent` plugin. Kodelet will not start two extensions that register the same tools, so replace the plugin instead of running both:
+
+1. Stop the runner and remove the plugin with `rm -rf ~/.kodelet/plugins/jingkaihe@kodelet-subagent`.
+2. Install `kodelet-extension-subagent` on `PATH` as described above, then start the runner.
+
+The first time the extension opens its data directory, it imports the plugin's database from the neighboring `jingkaihe@kodelet-subagent_subagent` data directory. Existing agents can still be listed, waited on, and resumed with `followup_agent`; agents that were still running are marked interrupted. The import only happens while the new database does not exist yet, and the old database is only read, so you can delete it once you no longer need it. If the old database cannot be imported, tool calls report why; move it aside to start with an empty database.
+
 ## Model profiles
 
 Fresh agents use the parent conversation's model profile. To use a different profile, set `KODELET_SUBAGENT_PROFILE` (for example, `generic`) in the environment of the runner that hosts the extension, then restart that runner. Forked agents and follow-ups keep the conversation's saved settings.
 
-## Installation
+## Commands
+
+Run without arguments, the binary serves the Kodelet extension protocol over stdio. It also accepts:
+
+| Command | Purpose |
+| --- | --- |
+| `migrate DATABASE` | Upgrade a subagent SQLite database to the latest schema revision. |
+| `version` | Print the version. |
+| `help` | Print usage. |
+
+Databases are upgraded automatically when the extension opens them, so `migrate` is only needed to prepare a database ahead of time.
+
+## Development
+
+Tools and tasks are managed with [mise](https://mise.jdx.dev):
 
 ```bash
-uvx kodelet-subagent install
+mise install          # Go, golangci-lint, gofumpt, and GoReleaser
+mise run fmt          # format with gofumpt, goimports, and gci
+mise run check        # formatting, whitespace, tidiness, lint, race tests, build, release config
+mise run build        # build bin/kodelet-extension-subagent
+mise run snapshot     # cross-compile unpublished release binaries into dist/
 ```
 
-Or install from GitHub:
-
-```bash
-uvx --from git+https://github.com/jingkaihe/kodelet-subagent kodelet-subagent install
-```
-
-Verify that the runner discovers the extension:
-
-```bash
-kodelet extension inspect jingkaihe@kodelet-subagent/subagent
-```
+To release, bump `internal/version/VERSION`, commit, and run `mise run release`. It runs the checks, tags `v<version>`, and pushes; the release workflow then publishes the binaries to GitHub Releases.
 
 ## License
 

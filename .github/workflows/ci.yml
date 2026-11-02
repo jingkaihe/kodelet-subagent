@@ -6,49 +6,20 @@ on:
   pull_request:
 
 jobs:
-  python:
+  check:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.14"]
-    env:
-      UV_PYTHON: ${{ matrix.python-version }}
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python-version }}
-      - uses: astral-sh/setup-uv@v8.1.0
-        with:
-          enable-cache: true
-      - run: uv sync --locked
-      - run: uv run -- python --version
-      - run: uv run -- ruff check
-      - run: uv run -- ruff format --check
-      - run: uv run -- ty check
-      - run: uv run -- pytest -q
-      - if: matrix.python-version == '3.14'
-        run: uv build
-
-  go:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: go
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - uses: jdx/mise-action@v5
-        with:
-          working_directory: go
       - uses: actions/cache@v6
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
             ~/.cache/golangci-lint
-          key: go-${{ runner.os }}-${{ hashFiles('go/go.sum', 'go/mise.toml') }}
+          key: go-${{ runner.os }}-${{ hashFiles('go.sum', 'mise.toml') }}
           restore-keys: go-${{ runner.os }}-
       - run: mise run check
       - run: mise run snapshot
