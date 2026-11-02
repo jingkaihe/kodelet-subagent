@@ -1,4 +1,9 @@
-package agentdb
+// Package db stores durable background-agent state in SQLite.
+//
+// Runtime state transitions use explicit IMMEDIATE transactions. Every
+// worker-side update is fenced by the lease token, generation, runtime ID, and
+// lease expiry recorded when the run was claimed.
+package db
 
 import (
 	"context"
@@ -6,11 +11,10 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
-	"fmt"
-	"regexp"
 	"sync"
 	"time"
-	"unicode/utf8"
+
+	"github.com/jingkaihe/kodelet-subagent/internal/types"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -23,26 +27,7 @@ const (
 	MaxActiveAgentsTotal           = 8
 	LeaseDurationSeconds           = 60.0
 	MaxSteeringMessageLength       = 10_000
-	AgentNameMaxLength             = 48
 )
-
-// AgentNamePattern matches one to three lowercase kebab-case words.
-var AgentNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,2}$`)
-
-// ValidateAgentName returns name if it is a canonical agent name.
-func ValidateAgentName(name string) (string, error) {
-	if name == "" {
-		return "", errors.New("name is required")
-	}
-	if utf8.RuneCountInString(name) > AgentNameMaxLength {
-		return "", fmt.Errorf("name must be at most %d characters", AgentNameMaxLength)
-	}
-	if !AgentNamePattern.MatchString(name) {
-		return "", errors.New("name must contain one to three lowercase words separated by single " +
-			"hyphens, start with a letter, and contain only letters and digits")
-	}
-	return name, nil
-}
 
 // Clock returns the current time as epoch seconds.
 type Clock func() float64
@@ -217,37 +202,37 @@ func runRowTx(tx *sqlx.Tx, agentID, runID string) (runRow, error) {
 	return row, err
 }
 
-func fetchAgentTx(tx *sqlx.Tx, agentID, runID, ownerID string) (Agent, error) {
+func fetchAgentTx(tx *sqlx.Tx, agentID, runID, ownerID string) (types.Agent, error) {
 	agent, err := agentRowTx(tx, agentID)
 	if err != nil {
-		return Agent{}, err
+		return types.Agent{}, err
 	}
 	if ownerID != "" && agent.OwnerConversationID != ownerID {
-		return Agent{}, newError(kindNotFound, "agent not found: "+agentID)
+		return types.Agent{}, newError(kindNotFound, "agent not found: "+agentID)
 	}
 	if runID == "" {
 		runID = agent.ActiveRunID
 	}
 	run, err := runRowTx(tx, agentID, runID)
 	if err != nil {
-		return Agent{}, err
+		return types.Agent{}, err
 	}
-	return Agent{
+	return types.Agent{
 		ID:                  agent.ID,
 		Name:                agent.Name,
 		OwnerConversationID: agent.OwnerConversationID,
 		ConversationID:      agent.ChildConversationID,
-		ContextMode:         ContextMode(agent.ContextMode),
+		ContextMode:         types.ContextMode(agent.ContextMode),
 		CWD:                 agent.CWD,
-		Status:              AgentStatus(agent.Status),
+		Status:              types.AgentStatus(agent.Status),
 		Generation:          agent.Generation,
 		CreatedAt:           agent.CreatedAt,
 		UpdatedAt:           agent.UpdatedAt,
-		Run: Run{
+		Run: types.Run{
 			ID:          run.ID,
 			Generation:  run.Generation,
 			Task:        run.Task,
-			Status:      RunStatus(run.Status),
+			Status:      types.RunStatus(run.Status),
 			Result:      run.Result,
 			Error:       run.Error,
 			CreatedAt:   run.CreatedAt,

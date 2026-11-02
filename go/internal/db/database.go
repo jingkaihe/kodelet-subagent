@@ -1,4 +1,4 @@
-package agentdb
+package db
 
 import (
 	"context"
@@ -15,6 +15,9 @@ import (
 	"github.com/jmoiron/sqlx"
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 )
+
+// Filename is the SQLite file created in the extension data directory.
+const Filename = "subagents.sqlite"
 
 // SQLiteBusyTimeoutMS bounds how long a connection waits for SQLite locks.
 const SQLiteBusyTimeoutMS = 5_000

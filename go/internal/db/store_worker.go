@@ -1,10 +1,12 @@
-package agentdb
+package db
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/jingkaihe/kodelet-subagent/internal/types"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -20,7 +22,7 @@ func (s *Store) reconcileExpiredTx(tx *sqlx.Tx, now float64) (int, error) {
 	}
 	reconciled := 0
 	for _, row := range rows {
-		if row.Status == string(AgentCanceling) {
+		if row.Status == string(types.AgentCanceling) {
 			completed, err := completeCancelRowTx(tx, row.ID, row.ActiveRunID, row.Generation, now)
 			if err != nil {
 				return 0, err
@@ -87,12 +89,12 @@ func (s *Store) attachChildConversationTx(tx *sqlx.Tx, agent agentRow, agentID, 
 }
 
 // AttachConversation records the child conversation for an active claim.
-func (s *Store) AttachConversation(ctx context.Context, lease *Lease, conversationID string) (Agent, error) {
+func (s *Store) AttachConversation(ctx context.Context, lease *types.Lease, conversationID string) (types.Agent, error) {
 	conversationID = strings.TrimSpace(conversationID)
 	if conversationID == "" {
-		return Agent{}, errors.New("conversation id is required")
+		return types.Agent{}, errors.New("conversation id is required")
 	}
-	var agent Agent
+	var agent types.Agent
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
 			return err
@@ -112,12 +114,12 @@ func (s *Store) AttachConversation(ctx context.Context, lease *Lease, conversati
 
 // AttachCancelingConversation records the child conversation for a claim
 // whose cancellation is still being cleaned up.
-func (s *Store) AttachCancelingConversation(ctx context.Context, lease *Lease, conversationID string) (Agent, error) {
+func (s *Store) AttachCancelingConversation(ctx context.Context, lease *types.Lease, conversationID string) (types.Agent, error) {
 	conversationID = strings.TrimSpace(conversationID)
 	if conversationID == "" {
-		return Agent{}, errors.New("conversation id is required")
+		return types.Agent{}, errors.New("conversation id is required")
 	}
-	var agent Agent
+	var agent types.Agent
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
 			return err
@@ -136,12 +138,12 @@ func (s *Store) AttachCancelingConversation(ctx context.Context, lease *Lease, c
 }
 
 // MarkRunning records that the claimed run started in conversationID.
-func (s *Store) MarkRunning(ctx context.Context, lease *Lease, conversationID string) (Agent, error) {
+func (s *Store) MarkRunning(ctx context.Context, lease *types.Lease, conversationID string) (types.Agent, error) {
 	conversationID = strings.TrimSpace(conversationID)
 	if conversationID == "" {
-		return Agent{}, errors.New("conversation id is required")
+		return types.Agent{}, errors.New("conversation id is required")
 	}
-	var agent Agent
+	var agent types.Agent
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
 			return err
@@ -150,7 +152,7 @@ func (s *Store) MarkRunning(ctx context.Context, lease *Lease, conversationID st
 		if err != nil {
 			return err
 		}
-		if !AgentStatus(agentRow.Status).Active() {
+		if !types.AgentStatus(agentRow.Status).Active() {
 			return newError(kindConflict, "agent is "+agentRow.Status)
 		}
 		if agentRow.ChildConversationID != nil && *agentRow.ChildConversationID != conversationID {
@@ -165,7 +167,7 @@ func (s *Store) MarkRunning(ctx context.Context, lease *Lease, conversationID st
 			}
 			return err
 		}
-		if !RunStatus(runRow.Status).Active() {
+		if !types.RunStatus(runRow.Status).Active() {
 			return newError(kindConflict, "run is "+runRow.Status)
 		}
 		if _, err := tx.Exec(`
@@ -183,24 +185,24 @@ func (s *Store) MarkRunning(ctx context.Context, lease *Lease, conversationID st
 
 // Terminal records the end of a claimed run and releases its lease. Repeating
 // an identical terminal update is idempotent.
-func (s *Store) Terminal(ctx context.Context, lease *Lease, status TerminalStatus, update TerminalUpdate) (Agent, error) {
-	var desired RunStatus
+func (s *Store) Terminal(ctx context.Context, lease *types.Lease, status types.TerminalStatus, update types.TerminalUpdate) (types.Agent, error) {
+	var desired types.RunStatus
 	switch status {
-	case TerminalIdle:
-		desired = RunCompleted
-	case TerminalFailed:
-		desired = RunFailed
-	case TerminalInterrupted:
-		desired = RunInterrupted
+	case types.TerminalIdle:
+		desired = types.RunCompleted
+	case types.TerminalFailed:
+		desired = types.RunFailed
+	case types.TerminalInterrupted:
+		desired = types.RunInterrupted
 	default:
-		return Agent{}, fmt.Errorf("unsupported terminal status: %s", status)
+		return types.Agent{}, fmt.Errorf("unsupported terminal status: %s", status)
 	}
 	var normalized *string
 	if update.ConversationID != nil {
 		trimmed := strings.TrimSpace(*update.ConversationID)
 		normalized = &trimmed
 	}
-	var agent Agent
+	var agent types.Agent
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
 			return err
@@ -216,7 +218,7 @@ func (s *Store) Terminal(ctx context.Context, lease *Lease, status TerminalStatu
 		if err := validateRunToken(runRow, lease); err != nil {
 			return err
 		}
-		if !RunStatus(runRow.Status).Active() {
+		if !types.RunStatus(runRow.Status).Active() {
 			if runRow.Status == string(desired) && equalStrings(runRow.Result, update.Result) && equalStrings(runRow.Error, update.Error) {
 				agent, err = fetchAgentTx(tx, lease.AgentID, lease.RunID, "")
 				return err
@@ -226,8 +228,8 @@ func (s *Store) Terminal(ctx context.Context, lease *Lease, status TerminalStatu
 		if err := s.validateActiveLeaseRows(agentRow, runRow, lease, now); err != nil {
 			return err
 		}
-		current := AgentStatus(agentRow.Status)
-		if status == TerminalIdle && current != AgentRunning {
+		current := types.AgentStatus(agentRow.Status)
+		if status == types.TerminalIdle && current != types.AgentRunning {
 			return newError(kindConflict, "agent must be running before becoming idle, currently "+string(current))
 		}
 		if !current.Active() {
@@ -241,7 +243,7 @@ func (s *Store) Terminal(ctx context.Context, lease *Lease, status TerminalStatu
 		if existing != nil {
 			resolved = existing
 		}
-		if status == TerminalIdle && (resolved == nil || *resolved == "") {
+		if status == types.TerminalIdle && (resolved == nil || *resolved == "") {
 			return newError(kindConflict, "completed agent must have a child conversation")
 		}
 		if _, err := tx.Exec(`
@@ -263,7 +265,7 @@ func (s *Store) Terminal(ctx context.Context, lease *Lease, status TerminalStatu
 	return agent, err
 }
 
-func (s *Store) renewLease(ctx context.Context, lease *Lease, canceling bool) (float64, error) {
+func (s *Store) renewLease(ctx context.Context, lease *types.Lease, canceling bool) (float64, error) {
 	var expiresAt float64
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		expiresAt = now + LeaseDurationSeconds
@@ -290,17 +292,17 @@ func (s *Store) renewLease(ctx context.Context, lease *Lease, canceling bool) (f
 }
 
 // Heartbeat renews an active claim.
-func (s *Store) Heartbeat(ctx context.Context, lease *Lease) (float64, error) {
+func (s *Store) Heartbeat(ctx context.Context, lease *types.Lease) (float64, error) {
 	return s.renewLease(ctx, lease, false)
 }
 
 // HeartbeatCanceling renews a claim whose cancellation cleanup is in progress.
-func (s *Store) HeartbeatCanceling(ctx context.Context, lease *Lease) (float64, error) {
+func (s *Store) HeartbeatCanceling(ctx context.Context, lease *types.Lease) (float64, error) {
 	return s.renewLease(ctx, lease, true)
 }
 
 // CompleteCancel finishes a canceling claim once its owner has cleaned up.
-func (s *Store) CompleteCancel(ctx context.Context, lease *Lease) (bool, error) {
+func (s *Store) CompleteCancel(ctx context.Context, lease *types.Lease) (bool, error) {
 	var completed bool
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
@@ -320,11 +322,11 @@ func (s *Store) CompleteCancel(ctx context.Context, lease *Lease) (bool, error) 
 		if agentRow.ActiveRunID != lease.RunID || agentRow.Generation != lease.Generation {
 			return nil
 		}
-		switch AgentStatus(agentRow.Status) {
-		case AgentCanceled:
+		switch types.AgentStatus(agentRow.Status) {
+		case types.AgentCanceled:
 			completed = true
 			return nil
-		case AgentCanceling:
+		case types.AgentCanceling:
 		default:
 			return nil
 		}

@@ -1,10 +1,12 @@
-package agentdb
+package db
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/jingkaihe/kodelet-subagent/internal/types"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -35,28 +37,28 @@ func checkLimitsTx(tx *sqlx.Tx, ownerID string) error {
 }
 
 // Create reserves a new agent and its first run.
-func (s *Store) Create(ctx context.Context, ownerID, name, task, cwd string, mode ContextMode) (Claim, error) {
+func (s *Store) Create(ctx context.Context, ownerID, name, task, cwd string, mode types.ContextMode) (types.Claim, error) {
 	ownerID = strings.TrimSpace(ownerID)
-	name, err := ValidateAgentName(name)
+	name, err := types.ValidateAgentName(name)
 	if err != nil {
-		return Claim{}, err
+		return types.Claim{}, err
 	}
 	task = strings.TrimSpace(task)
 	cwd = strings.TrimSpace(cwd)
 	switch {
 	case ownerID == "":
-		return Claim{}, errors.New("async agents require an active conversation ID")
+		return types.Claim{}, errors.New("async agents require an active conversation ID")
 	case task == "":
-		return Claim{}, errors.New("task is required")
+		return types.Claim{}, errors.New("task is required")
 	case cwd == "":
-		return Claim{}, errors.New("cwd is required")
-	case mode != ContextFork && mode != ContextFresh:
-		return Claim{}, fmt.Errorf("unsupported context mode: %s", mode)
+		return types.Claim{}, errors.New("cwd is required")
+	case mode != types.ContextFork && mode != types.ContextFresh:
+		return types.Claim{}, fmt.Errorf("unsupported context mode: %s", mode)
 	}
 	agentID := newID("agt_")
 	runID := newID("run_")
 	token := newToken()
-	var agent Agent
+	var agent types.Agent
 	var expiresAt float64
 	err = s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		expiresAt = now + LeaseDurationSeconds
@@ -96,14 +98,14 @@ func (s *Store) Create(ctx context.Context, ownerID, name, task, cwd string, mod
 		return err
 	})
 	if err != nil {
-		return Claim{}, err
+		return types.Claim{}, err
 	}
-	return Claim{Agent: agent, Lease: NewLease(agentID, runID, 1, token, s.runtimeID, expiresAt)}, nil
+	return types.Claim{Agent: agent, Lease: types.NewLease(agentID, runID, 1, token, s.runtimeID, expiresAt)}, nil
 }
 
 // Get returns an owned agent with its active run, or with runID when given.
-func (s *Store) Get(ctx context.Context, ownerID, agentID, runID string) (Agent, error) {
-	var agent Agent
+func (s *Store) Get(ctx context.Context, ownerID, agentID, runID string) (types.Agent, error) {
+	var agent types.Agent
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
 			return err
@@ -116,16 +118,16 @@ func (s *Store) Get(ctx context.Context, ownerID, agentID, runID string) (Agent,
 }
 
 // List returns an owner's agents, active agents first, most recent first.
-func (s *Store) List(ctx context.Context, ownerID string) ([]Agent, error) {
+func (s *Store) List(ctx context.Context, ownerID string) ([]types.Agent, error) {
 	return s.ListLimit(ctx, ownerID, DefaultListLimit)
 }
 
 // ListLimit is List with an explicit limit between 1 and MaxListLimit.
-func (s *Store) ListLimit(ctx context.Context, ownerID string, limit int) ([]Agent, error) {
+func (s *Store) ListLimit(ctx context.Context, ownerID string, limit int) ([]types.Agent, error) {
 	if limit < 1 || limit > MaxListLimit {
 		return nil, fmt.Errorf("limit must be between 1 and %d", MaxListLimit)
 	}
-	var agents []Agent
+	var agents []types.Agent
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
 			return err
@@ -140,7 +142,7 @@ func (s *Store) ListLimit(ctx context.Context, ownerID string, limit int) ([]Age
 			LIMIT ?`, strings.TrimSpace(ownerID), limit); err != nil {
 			return err
 		}
-		agents = make([]Agent, 0, len(ids))
+		agents = make([]types.Agent, 0, len(ids))
 		for _, id := range ids {
 			agent, err := fetchAgentTx(tx, id, "", "")
 			if err != nil {
@@ -154,16 +156,16 @@ func (s *Store) ListLimit(ctx context.Context, ownerID string, limit int) ([]Age
 }
 
 // Claim reserves a follow-up run for an idle, failed, interrupted, or canceled agent.
-func (s *Store) Claim(ctx context.Context, ownerID, agentID, task string) (Claim, error) {
+func (s *Store) Claim(ctx context.Context, ownerID, agentID, task string) (types.Claim, error) {
 	ownerID = strings.TrimSpace(ownerID)
 	agentID = strings.TrimSpace(agentID)
 	task = strings.TrimSpace(task)
 	if task == "" {
-		return Claim{}, errors.New("task is required")
+		return types.Claim{}, errors.New("task is required")
 	}
 	runID := newID("run_")
 	token := newToken()
-	var agent Agent
+	var agent types.Agent
 	var expiresAt float64
 	var generation int
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
@@ -178,7 +180,7 @@ func (s *Store) Claim(ctx context.Context, ownerID, agentID, task string) (Claim
 		if !current.Status.Claimable() {
 			return newError(kindConflict, "agent is "+string(current.Status))
 		}
-		if current.ConversationID == nil && current.Status == AgentIdle {
+		if current.ConversationID == nil && current.Status == types.AgentIdle {
 			return newError(kindConflict, "agent has no child conversation to resume")
 		}
 		if err := checkLimitsTx(tx, ownerID); err != nil {
@@ -219,13 +221,13 @@ func (s *Store) Claim(ctx context.Context, ownerID, agentID, task string) (Claim
 		return err
 	})
 	if err != nil {
-		return Claim{}, err
+		return types.Claim{}, err
 	}
-	return Claim{Agent: agent, Lease: NewLease(agentID, runID, generation, token, s.runtimeID, expiresAt)}, nil
+	return types.Claim{Agent: agent, Lease: types.NewLease(agentID, runID, generation, token, s.runtimeID, expiresAt)}, nil
 }
 
 // Abort deletes an unstarted initial reservation.
-func (s *Store) Abort(ctx context.Context, lease *Lease) (bool, error) {
+func (s *Store) Abort(ctx context.Context, lease *types.Lease) (bool, error) {
 	var deleted bool
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
@@ -238,8 +240,8 @@ func (s *Store) Abort(ctx context.Context, lease *Lease) (bool, error) {
 		if err != nil {
 			return err
 		}
-		if lease.Generation != 1 || agentRow.Status != string(AgentStarting) ||
-			runRow.Status != string(RunStarting) || agentRow.ChildConversationID != nil {
+		if lease.Generation != 1 || agentRow.Status != string(types.AgentStarting) ||
+			runRow.Status != string(types.RunStarting) || agentRow.ChildConversationID != nil {
 			return newError(kindConflict, "only an unstarted initial reservation can be aborted")
 		}
 		result, err := tx.Exec(`DELETE FROM agents WHERE id = ?`, lease.AgentID)
@@ -255,8 +257,8 @@ func (s *Store) Abort(ctx context.Context, lease *Lease) (bool, error) {
 
 // Cancel records cancellation. Active agents move to canceling until their
 // owner finishes cleanup; inactive agents become canceled immediately.
-func (s *Store) Cancel(ctx context.Context, ownerID, agentID string) (Agent, error) {
-	var agent Agent
+func (s *Store) Cancel(ctx context.Context, ownerID, agentID string) (types.Agent, error) {
+	var agent types.Agent
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
 			return err
@@ -265,7 +267,7 @@ func (s *Store) Cancel(ctx context.Context, ownerID, agentID string) (Agent, err
 		if err != nil {
 			return err
 		}
-		if current.Status != AgentCanceling && current.Status != AgentCanceled {
+		if current.Status != types.AgentCanceling && current.Status != types.AgentCanceled {
 			if err := deleteRunMessagesTx(tx, current.ID, current.Run.ID, current.Run.Generation); err != nil {
 				return err
 			}

@@ -1,7 +1,9 @@
-package agentdb
+package db
 
 import (
 	"crypto/subtle"
+
+	"github.com/jingkaihe/kodelet-subagent/internal/types"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -10,7 +12,7 @@ func tokensEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-func validateRunToken(run runRow, lease *Lease) error {
+func validateRunToken(run runRow, lease *types.Lease) error {
 	if run.Generation != lease.Generation {
 		return newError(kindLeaseLost, "async-agent generation changed")
 	}
@@ -20,7 +22,7 @@ func validateRunToken(run runRow, lease *Lease) error {
 	return nil
 }
 
-func (s *Store) validateLeaseOwnership(agent agentRow, run runRow, lease *Lease, now float64) error {
+func (s *Store) validateLeaseOwnership(agent agentRow, run runRow, lease *types.Lease, now float64) error {
 	if err := validateRunToken(run, lease); err != nil {
 		return err
 	}
@@ -45,20 +47,20 @@ func (s *Store) validateLeaseOwnership(agent agentRow, run runRow, lease *Lease,
 	return nil
 }
 
-func (s *Store) validateActiveLeaseRows(agent agentRow, run runRow, lease *Lease, now float64) error {
+func (s *Store) validateActiveLeaseRows(agent agentRow, run runRow, lease *types.Lease, now float64) error {
 	if err := s.validateLeaseOwnership(agent, run, lease, now); err != nil {
 		return err
 	}
-	if !AgentStatus(agent.Status).Active() {
+	if !types.AgentStatus(agent.Status).Active() {
 		return newError(kindLeaseLost, "async-agent is "+agent.Status)
 	}
-	if !RunStatus(run.Status).Active() {
+	if !types.RunStatus(run.Status).Active() {
 		return newError(kindLeaseLost, "async-agent run is "+run.Status)
 	}
 	return nil
 }
 
-func (s *Store) validateActiveLeaseTx(tx *sqlx.Tx, lease *Lease, now float64) (agentRow, runRow, error) {
+func (s *Store) validateActiveLeaseTx(tx *sqlx.Tx, lease *types.Lease, now float64) (agentRow, runRow, error) {
 	agent, err := agentRowTx(tx, lease.AgentID)
 	if err != nil {
 		return agent, runRow{}, err
@@ -70,20 +72,20 @@ func (s *Store) validateActiveLeaseTx(tx *sqlx.Tx, lease *Lease, now float64) (a
 	return agent, run, s.validateActiveLeaseRows(agent, run, lease, now)
 }
 
-func (s *Store) validateCancelingLeaseRows(agent agentRow, run runRow, lease *Lease, now float64) error {
+func (s *Store) validateCancelingLeaseRows(agent agentRow, run runRow, lease *types.Lease, now float64) error {
 	if err := s.validateLeaseOwnership(agent, run, lease, now); err != nil {
 		return err
 	}
-	if agent.Status != string(AgentCanceling) {
+	if agent.Status != string(types.AgentCanceling) {
 		return newError(kindLeaseLost, "async-agent is "+agent.Status)
 	}
-	if run.Status != string(RunCanceled) {
+	if run.Status != string(types.RunCanceled) {
 		return newError(kindLeaseLost, "async-agent run is "+run.Status)
 	}
 	return nil
 }
 
-func (s *Store) validateCancelingLeaseTx(tx *sqlx.Tx, lease *Lease, now float64) (agentRow, runRow, error) {
+func (s *Store) validateCancelingLeaseTx(tx *sqlx.Tx, lease *types.Lease, now float64) (agentRow, runRow, error) {
 	agent, err := agentRowTx(tx, lease.AgentID)
 	if err != nil {
 		return agent, runRow{}, err

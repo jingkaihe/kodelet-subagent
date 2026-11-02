@@ -1,4 +1,4 @@
-package agentdb
+package db
 
 import (
 	"context"
@@ -8,19 +8,21 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/jingkaihe/kodelet-subagent/internal/types"
+
 	"github.com/jmoiron/sqlx"
 )
 
 // EnqueueSteering queues guidance for a running agent's current run.
-func (s *Store) EnqueueSteering(ctx context.Context, ownerID, agentID, message string) (EnqueueSteeringResult, error) {
+func (s *Store) EnqueueSteering(ctx context.Context, ownerID, agentID, message string) (types.EnqueueSteeringResult, error) {
 	message = strings.TrimSpace(message)
 	if message == "" {
-		return EnqueueSteeringResult{}, errors.New("steering message is required")
+		return types.EnqueueSteeringResult{}, errors.New("steering message is required")
 	}
 	if utf8.RuneCountInString(message) > MaxSteeringMessageLength {
-		return EnqueueSteeringResult{}, fmt.Errorf("steering message exceeds %d characters", MaxSteeringMessageLength)
+		return types.EnqueueSteeringResult{}, fmt.Errorf("steering message exceeds %d characters", MaxSteeringMessageLength)
 	}
-	var result EnqueueSteeringResult
+	var result types.EnqueueSteeringResult
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
 			return err
@@ -33,7 +35,7 @@ func (s *Store) EnqueueSteering(ctx context.Context, ownerID, agentID, message s
 		if err != nil {
 			return err
 		}
-		if current.Status != AgentRunning || current.Run.Status != RunRunning || current.ConversationID == nil ||
+		if current.Status != types.AgentRunning || current.Run.Status != types.RunRunning || current.ConversationID == nil ||
 			agentRow.LeaseExpiresAt == nil || *agentRow.LeaseExpiresAt <= now {
 			return newError(kindConflict, "agent is not currently running")
 		}
@@ -50,15 +52,15 @@ func (s *Store) EnqueueSteering(ctx context.Context, ownerID, agentID, message s
 			VALUES (?, ?, ?, ?, ?)`, current.ID, current.Run.ID, current.Run.Generation, message, now); err != nil {
 			return err
 		}
-		result = EnqueueSteeringResult{Accepted: true, AlreadyPending: pending != 0}
+		result = types.EnqueueSteeringResult{Accepted: true, AlreadyPending: pending != 0}
 		return nil
 	})
 	return result, err
 }
 
 // NextSteering returns the oldest queued message for a running claim, or nil.
-func (s *Store) NextSteering(ctx context.Context, lease *Lease) (*SteeringMessage, error) {
-	var message *SteeringMessage
+func (s *Store) NextSteering(ctx context.Context, lease *types.Lease) (*types.SteeringMessage, error) {
+	var message *types.SteeringMessage
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
 			return err
@@ -67,7 +69,7 @@ func (s *Store) NextSteering(ctx context.Context, lease *Lease) (*SteeringMessag
 		if err != nil {
 			return err
 		}
-		if agentRow.Status != string(AgentRunning) || runRow.Status != string(RunRunning) {
+		if agentRow.Status != string(types.AgentRunning) || runRow.Status != string(types.RunRunning) {
 			return newError(kindLeaseLost, "async-agent run is no longer running")
 		}
 		var row struct {
@@ -85,14 +87,14 @@ func (s *Store) NextSteering(ctx context.Context, lease *Lease) (*SteeringMessag
 		if err != nil {
 			return err
 		}
-		message = &SteeringMessage{ID: row.ID, Message: row.Message}
+		message = &types.SteeringMessage{ID: row.ID, Message: row.Message}
 		return nil
 	})
 	return message, err
 }
 
 // AcknowledgeSteering deletes a delivered steering message.
-func (s *Store) AcknowledgeSteering(ctx context.Context, lease *Lease, messageID int64) (bool, error) {
+func (s *Store) AcknowledgeSteering(ctx context.Context, lease *types.Lease, messageID int64) (bool, error) {
 	var deleted bool
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {

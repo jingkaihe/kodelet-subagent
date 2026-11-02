@@ -1,17 +1,11 @@
-// Package agentdb stores durable background-agent state in SQLite.
-//
-// Runtime state transitions use explicit IMMEDIATE transactions. Every
-// worker-side update is fenced by the lease token, generation, runtime ID, and
-// lease expiry recorded when the run was claimed.
-package agentdb
+// Package types defines the durable background-agent domain model shared by
+// the database and the runtime.
+package types
 
 import (
 	"math"
 	"sync/atomic"
 )
-
-// Filename is the SQLite file created in the extension data directory.
-const Filename = "subagents.sqlite"
 
 // ContextMode selects how an agent's conversation is initialized.
 type ContextMode string

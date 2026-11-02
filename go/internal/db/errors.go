@@ -1,4 +1,4 @@
-package agentdb
+package db
 
 import "errors"
 

@@ -1,4 +1,4 @@
-package agentdb
+package db
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/jingkaihe/kodelet-subagent/internal/types"
 
 	"github.com/stretchr/testify/require"
 )
@@ -68,7 +70,7 @@ func TestStoreResolvesRelativeDatabasePathAtConstruction(t *testing.T) {
 
 	t.Chdir(later)
 	ctx := context.Background()
-	claim, err := store.Create(ctx, "owner", "stable-path", "verify stable database ownership", later, ContextFresh)
+	claim, err := store.Create(ctx, "owner", "stable-path", "verify stable database ownership", later, types.ContextFresh)
 	require.NoError(t, err)
 	persisted, err := store.Get(ctx, "owner", claim.Agent.ID, "")
 	require.NoError(t, err)
@@ -81,7 +83,7 @@ func TestSchemaWALAndRecordsSurviveStoreReconstruction(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	store := newTestStore(t, filepath.Join(dir, Filename), "runtime-original", nil)
-	claim, err := store.Create(ctx, "owner-1", "persistence-worker", "persist this task", dir, ContextFresh)
+	claim, err := store.Create(ctx, "owner-1", "persistence-worker", "persist this task", dir, types.ContextFresh)
 	require.NoError(t, err)
 	require.NoError(t, store.Close())
 
@@ -97,22 +99,22 @@ func TestSchemaWALAndRecordsSurviveStoreReconstruction(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "persist this task", persisted.Run.Task)
 	require.Equal(t, "persistence-worker", persisted.Name)
-	require.Equal(t, AgentStarting, persisted.Status)
+	require.Equal(t, types.AgentStarting, persisted.Status)
 }
 
 func TestAgentNamesAreCanonicalAndUniquePerOwner(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	store := newTestStore(t, filepath.Join(dir, "agent-names", Filename), "runtime-names", nil)
-	first, err := store.Create(ctx, "owner", "research-agent", "first task", dir, ContextFresh)
+	first, err := store.Create(ctx, "owner", "research-agent", "first task", dir, types.ContextFresh)
 	require.NoError(t, err)
 	require.Equal(t, "research-agent", first.Agent.Name)
 
-	_, err = store.Create(ctx, "owner", "research-agent", "duplicate task", dir, ContextFresh)
+	_, err = store.Create(ctx, "owner", "research-agent", "duplicate task", dir, types.ContextFresh)
 	require.ErrorIs(t, err, ErrAgentConflict)
 	require.ErrorContains(t, err, "agent name already exists")
 
-	other, err := store.Create(ctx, "other-owner", "research-agent", "other task", dir, ContextFresh)
+	other, err := store.Create(ctx, "other-owner", "research-agent", "other task", dir, types.ContextFresh)
 	require.NoError(t, err)
 	require.Equal(t, "research-agent", other.Agent.Name)
 
@@ -120,7 +122,7 @@ func TestAgentNamesAreCanonicalAndUniquePerOwner(t *testing.T) {
 		"Research-agent", "research agent", "research_agent", "one-two-three-four",
 		"-reviewer", "reviewer-", "reviewer--one", "1-reviewer",
 	} {
-		_, err := store.Create(ctx, "owner", invalid, "invalid task", dir, ContextFresh)
+		_, err := store.Create(ctx, "owner", invalid, "invalid task", dir, types.ContextFresh)
 		require.ErrorContains(t, err, "name must contain", invalid)
 	}
 }
@@ -139,7 +141,7 @@ func TestStoreLimitsAreAtomicPerOwnerAndGlobally(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				_, errs[i] = store.Create(ctx, owner(i), "agent-"+string(rune('a'+i)), "task", dir, ContextFresh)
+				_, errs[i] = store.Create(ctx, owner(i), "agent-"+string(rune('a'+i)), "task", dir, types.ContextFresh)
 			}()
 		}
 		wg.Wait()
@@ -172,7 +174,7 @@ func TestExpiryReconciliationAndGenerationRuntimeFencing(t *testing.T) {
 	dir := t.TempDir()
 	clock := newMutableClock()
 	store := newTestStore(t, filepath.Join(dir, "leases", Filename), "runtime-a", clock.now)
-	claim, err := store.Create(ctx, "owner", "lease-worker", "work", dir, ContextFresh)
+	claim, err := store.Create(ctx, "owner", "lease-worker", "work", dir, types.ContextFresh)
 	require.NoError(t, err)
 	_, err = store.MarkRunning(ctx, claim.Lease, "child-lease")
 	require.NoError(t, err)
@@ -182,8 +184,8 @@ func TestExpiryReconciliationAndGenerationRuntimeFencing(t *testing.T) {
 	require.Equal(t, 1, reconciled)
 	expired, err := store.Get(ctx, "owner", claim.Agent.ID, "")
 	require.NoError(t, err)
-	require.Equal(t, AgentInterrupted, expired.Status)
-	require.Equal(t, RunInterrupted, expired.Run.Status)
+	require.Equal(t, types.AgentInterrupted, expired.Status)
+	require.Equal(t, types.RunInterrupted, expired.Run.Status)
 	require.Contains(t, *expired.Run.Error, "lease expired")
 
 	resumed, err := store.Claim(ctx, "owner", claim.Agent.ID, "retry")
@@ -201,7 +203,7 @@ func TestCancelingLeaseExpiryRecoversToResumableCanceled(t *testing.T) {
 	dir := t.TempDir()
 	clock := newMutableClock()
 	owner := newTestStore(t, filepath.Join(dir, "cancel-expiry", Filename), "runtime-owner", clock.now)
-	claim, err := owner.Create(ctx, "owner", "cancel-expiry-worker", "work", dir, ContextFresh)
+	claim, err := owner.Create(ctx, "owner", "cancel-expiry-worker", "work", dir, types.ContextFresh)
 	require.NoError(t, err)
 	_, err = owner.MarkRunning(ctx, claim.Lease, "child-cancel-expiry")
 	require.NoError(t, err)
@@ -209,8 +211,8 @@ func TestCancelingLeaseExpiryRecoversToResumableCanceled(t *testing.T) {
 
 	canceling, err := other.Cancel(ctx, "owner", claim.Agent.ID)
 	require.NoError(t, err)
-	require.Equal(t, AgentCanceling, canceling.Status)
-	require.Equal(t, RunCanceled, canceling.Run.Status)
+	require.Equal(t, types.AgentCanceling, canceling.Status)
+	require.Equal(t, types.RunCanceled, canceling.Run.Status)
 	_, err = other.Claim(ctx, "owner", claim.Agent.ID, "too early")
 	require.ErrorIs(t, err, ErrAgentConflict)
 	require.ErrorContains(t, err, "agent is canceling")
@@ -225,7 +227,7 @@ func TestCancelingLeaseExpiryRecoversToResumableCanceled(t *testing.T) {
 	require.Zero(t, reconciled)
 	still, err := other.Get(ctx, "owner", claim.Agent.ID, "")
 	require.NoError(t, err)
-	require.Equal(t, AgentCanceling, still.Status)
+	require.Equal(t, types.AgentCanceling, still.Status)
 
 	clock.advance(LeaseDurationSeconds - 10 + 0.1)
 	reconciled, err = other.ReconcileExpired(ctx)
@@ -233,7 +235,7 @@ func TestCancelingLeaseExpiryRecoversToResumableCanceled(t *testing.T) {
 	require.Equal(t, 1, reconciled)
 	canceled, err := other.Get(ctx, "owner", claim.Agent.ID, "")
 	require.NoError(t, err)
-	require.Equal(t, AgentCanceled, canceled.Status)
+	require.Equal(t, types.AgentCanceled, canceled.Status)
 	resumed, err := other.Claim(ctx, "owner", claim.Agent.ID, "resume after recovery")
 	require.NoError(t, err)
 	require.Equal(t, 2, resumed.Agent.Generation)
@@ -250,9 +252,9 @@ func TestInterruptRuntimeOnlyTouchesItsOwnRows(t *testing.T) {
 	path := filepath.Join(dir, "session-end", Filename)
 	current := newTestStore(t, path, "current-runtime", nil)
 	other := newTestStore(t, path, "other-runtime", nil)
-	currentClaim, err := current.Create(ctx, "current-owner", "current-worker", "current task", dir, ContextFresh)
+	currentClaim, err := current.Create(ctx, "current-owner", "current-worker", "current task", dir, types.ContextFresh)
 	require.NoError(t, err)
-	otherClaim, err := other.Create(ctx, "other-owner", "other-worker", "other task", dir, ContextFresh)
+	otherClaim, err := other.Create(ctx, "other-owner", "other-worker", "other task", dir, types.ContextFresh)
 	require.NoError(t, err)
 
 	interrupted, err := current.InterruptRuntime(ctx, "agent interrupted because the extension session stopped")
@@ -263,27 +265,27 @@ func TestInterruptRuntimeOnlyTouchesItsOwnRows(t *testing.T) {
 	require.NoError(t, err)
 	otherRecord, err := current.Get(ctx, "other-owner", otherClaim.Agent.ID, "")
 	require.NoError(t, err)
-	require.Equal(t, AgentInterrupted, currentRecord.Status)
-	require.Equal(t, RunInterrupted, currentRecord.Run.Status)
-	require.Equal(t, AgentStarting, otherRecord.Status)
-	require.Equal(t, RunStarting, otherRecord.Run.Status)
+	require.Equal(t, types.AgentInterrupted, currentRecord.Status)
+	require.Equal(t, types.RunInterrupted, currentRecord.Run.Status)
+	require.Equal(t, types.AgentStarting, otherRecord.Status)
+	require.Equal(t, types.RunStarting, otherRecord.Run.Status)
 }
 
 func TestSteeringIsRunScopedAndCarriedToFollowups(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	store := newTestStore(t, filepath.Join(dir, "steering", Filename), "runtime-steering", nil)
-	claim, err := store.Create(ctx, "owner", "parser-worker", "long task", dir, ContextFresh)
+	claim, err := store.Create(ctx, "owner", "parser-worker", "long task", dir, types.ContextFresh)
 	require.NoError(t, err)
 	_, err = store.MarkRunning(ctx, claim.Lease, "child-steering")
 	require.NoError(t, err)
 
 	first, err := store.EnqueueSteering(ctx, "owner", claim.Agent.ID, "focus on the parser")
 	require.NoError(t, err)
-	require.Equal(t, EnqueueSteeringResult{Accepted: true}, first)
+	require.Equal(t, types.EnqueueSteeringResult{Accepted: true}, first)
 	second, err := store.EnqueueSteering(ctx, "owner", claim.Agent.ID, "  and the lexer  ")
 	require.NoError(t, err)
-	require.Equal(t, EnqueueSteeringResult{Accepted: true, AlreadyPending: true}, second)
+	require.Equal(t, types.EnqueueSteeringResult{Accepted: true, AlreadyPending: true}, second)
 	require.Equal(t, [][3]any{
 		{claim.Lease.RunID, 1, "focus on the parser"},
 		{claim.Lease.RunID, 1, "and the lexer"},
@@ -296,11 +298,11 @@ func TestSteeringIsRunScopedAndCarriedToFollowups(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, acknowledged)
 
-	terminal, err := store.Terminal(ctx, claim.Lease, TerminalIdle, TerminalUpdate{
+	terminal, err := store.Terminal(ctx, claim.Lease, types.TerminalIdle, types.TerminalUpdate{
 		ConversationID: strPtr("child-steering"), Result: strPtr("done"),
 	})
 	require.NoError(t, err)
-	require.Equal(t, RunCompleted, terminal.Run.Status)
+	require.Equal(t, types.RunCompleted, terminal.Run.Status)
 	require.Equal(t, [][3]any{{claim.Lease.RunID, 1, "and the lexer"}}, steeringRows(t, store.Path()))
 
 	_, err = store.EnqueueSteering(ctx, "owner", claim.Agent.ID, "too late")
@@ -331,7 +333,7 @@ func TestCancelDiscardsPendingSteeringAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	store := newTestStore(t, filepath.Join(dir, Filename), "runtime-cancel", nil)
-	claim, err := store.Create(ctx, "owner", "cancel-worker", "task", dir, ContextFresh)
+	claim, err := store.Create(ctx, "owner", "cancel-worker", "task", dir, types.ContextFresh)
 	require.NoError(t, err)
 	_, err = store.MarkRunning(ctx, claim.Lease, "child-cancel")
 	require.NoError(t, err)
@@ -340,7 +342,7 @@ func TestCancelDiscardsPendingSteeringAndIsIdempotent(t *testing.T) {
 
 	canceling, err := store.Cancel(ctx, "owner", claim.Agent.ID)
 	require.NoError(t, err)
-	require.Equal(t, AgentCanceling, canceling.Status)
+	require.Equal(t, types.AgentCanceling, canceling.Status)
 	require.Equal(t, "agent canceled by parent", *canceling.Run.Error)
 	require.Empty(t, steeringRows(t, store.Path()))
 
@@ -358,25 +360,25 @@ func TestCancelDiscardsPendingSteeringAndIsIdempotent(t *testing.T) {
 	require.True(t, completed)
 	again, err := store.Cancel(ctx, "owner", claim.Agent.ID)
 	require.NoError(t, err)
-	require.Equal(t, AgentCanceled, again.Status)
+	require.Equal(t, types.AgentCanceled, again.Status)
 
-	idle, err := store.Create(ctx, "owner", "idle-worker", "task", dir, ContextFresh)
+	idle, err := store.Create(ctx, "owner", "idle-worker", "task", dir, types.ContextFresh)
 	require.NoError(t, err)
 	_, err = store.MarkRunning(ctx, idle.Lease, "child-idle")
 	require.NoError(t, err)
-	_, err = store.Terminal(ctx, idle.Lease, TerminalIdle, TerminalUpdate{Result: strPtr("done")})
+	_, err = store.Terminal(ctx, idle.Lease, types.TerminalIdle, types.TerminalUpdate{Result: strPtr("done")})
 	require.NoError(t, err)
 	canceled, err := store.Cancel(ctx, "owner", idle.Agent.ID)
 	require.NoError(t, err)
-	require.Equal(t, AgentCanceled, canceled.Status)
-	require.Equal(t, RunCompleted, canceled.Run.Status)
+	require.Equal(t, types.AgentCanceled, canceled.Status)
+	require.Equal(t, types.RunCompleted, canceled.Run.Status)
 }
 
 func TestAbortDeletesOnlyUnstartedInitialReservations(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	store := newTestStore(t, filepath.Join(dir, Filename), "runtime-abort", nil)
-	claim, err := store.Create(ctx, "owner", "abort-worker", "task", dir, ContextFork)
+	claim, err := store.Create(ctx, "owner", "abort-worker", "task", dir, types.ContextFork)
 	require.NoError(t, err)
 	deleted, err := store.Abort(ctx, claim.Lease)
 	require.NoError(t, err)
@@ -388,14 +390,14 @@ func TestAbortDeletesOnlyUnstartedInitialReservations(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, agents)
 
-	started, err := store.Create(ctx, "owner", "started-worker", "task", dir, ContextFork)
+	started, err := store.Create(ctx, "owner", "started-worker", "task", dir, types.ContextFork)
 	require.NoError(t, err)
 	_, err = store.AttachConversation(ctx, started.Lease, "child-started")
 	require.NoError(t, err)
 	_, err = store.Abort(ctx, started.Lease)
 	require.ErrorIs(t, err, ErrAgentConflict)
 
-	other, err := store.Create(ctx, "owner", "other-worker", "task", dir, ContextFork)
+	other, err := store.Create(ctx, "owner", "other-worker", "task", dir, types.ContextFork)
 	require.NoError(t, err)
 	_, err = store.AttachConversation(ctx, other.Lease, "child-started")
 	require.ErrorIs(t, err, ErrAgentConflict)
@@ -406,22 +408,22 @@ func TestTerminalIsIdempotentOnlyForIdenticalUpdates(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	store := newTestStore(t, filepath.Join(dir, Filename), "runtime-retry", newMutableClock().now)
-	claim, err := store.Create(ctx, "owner", "retry-worker", "retry update", dir, ContextFresh)
+	claim, err := store.Create(ctx, "owner", "retry-worker", "retry update", dir, types.ContextFresh)
 	require.NoError(t, err)
-	_, err = store.Terminal(ctx, claim.Lease, TerminalIdle, TerminalUpdate{Result: strPtr("too early")})
+	_, err = store.Terminal(ctx, claim.Lease, types.TerminalIdle, types.TerminalUpdate{Result: strPtr("too early")})
 	require.ErrorIs(t, err, ErrAgentConflict)
 	require.ErrorContains(t, err, "agent must be running before becoming idle")
 	_, err = store.MarkRunning(ctx, claim.Lease, "child-retry")
 	require.NoError(t, err)
 
-	update := TerminalUpdate{ConversationID: strPtr("child-retry"), Result: strPtr("final answer")}
-	_, err = store.Terminal(ctx, claim.Lease, TerminalIdle, update)
+	update := types.TerminalUpdate{ConversationID: strPtr("child-retry"), Result: strPtr("final answer")}
+	_, err = store.Terminal(ctx, claim.Lease, types.TerminalIdle, update)
 	require.NoError(t, err)
-	repeated, err := store.Terminal(ctx, claim.Lease, TerminalIdle, update)
+	repeated, err := store.Terminal(ctx, claim.Lease, types.TerminalIdle, update)
 	require.NoError(t, err)
-	require.Equal(t, RunCompleted, repeated.Run.Status)
+	require.Equal(t, types.RunCompleted, repeated.Run.Status)
 	require.Equal(t, "final answer", *repeated.Run.Result)
-	_, err = store.Terminal(ctx, claim.Lease, TerminalIdle, TerminalUpdate{
+	_, err = store.Terminal(ctx, claim.Lease, types.TerminalIdle, types.TerminalUpdate{
 		ConversationID: strPtr("child-retry"), Result: strPtr("different answer"),
 	})
 	require.ErrorIs(t, err, ErrLeaseLost)
@@ -432,7 +434,7 @@ func TestCanceledContextDoesNotStartTransactions(t *testing.T) {
 	store := newTestStore(t, filepath.Join(dir, Filename), "runtime-context", nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := store.Create(ctx, "owner", "never-created", "task", dir, ContextFresh)
+	_, err := store.Create(ctx, "owner", "never-created", "task", dir, types.ContextFresh)
 	require.ErrorIs(t, err, context.Canceled)
 	agents, err := store.List(context.Background(), "owner")
 	require.NoError(t, err)
