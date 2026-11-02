@@ -80,7 +80,7 @@ mise run build        # build bin/kodelet-extension-subagent
 mise run snapshot     # cross-compile unpublished release binaries into dist/
 ```
 
-To release, bump `internal/version/VERSION`, commit, and run `mise run release`. It runs the checks, tags `v<version>`, and pushes; the release workflow then publishes the binaries to GitHub Releases.
+To release, bump `internal/version/VERSION`, commit it on `main`, and run `mise run release`. It requires a clean `main` and an unused `v<version>` tag, runs the checks, tags the commit, and pushes `main` and the tag together. The release workflow then publishes the binaries and `checksums.txt` to GitHub Releases.
 
 ## License
 

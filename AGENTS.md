@@ -47,4 +47,4 @@ Releases up to 0.6.7 were a Python package installed as the `jingkaihe@kodelet-s
 
 ## Releases
 
-`internal/version/VERSION` is the sole version source. `mise run release` runs the checks, creates the annotated tag `v<version>` on a clean worktree, and pushes it. The release workflow verifies the tag against `VERSION`, reruns the checks, and publishes the GoReleaser binaries and `checksums.txt` to GitHub Releases.
+`internal/version/VERSION` is the sole version source. `mise run release` requires a clean `main` and a `v<version>` tag that exists neither locally nor on `origin`; it runs the checks, creates the annotated tag, and pushes `main` and the tag atomically, removing the local tag if the push fails. The release workflow verifies the tag against `VERSION`, reruns the checks, and publishes the GoReleaser binaries and `checksums.txt` to GitHub Releases.

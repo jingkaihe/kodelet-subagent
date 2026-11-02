@@ -59,30 +59,33 @@ depends = ["fmt:check", "whitespace", "tidy:check", "lint", "test", "build", "re
 description = "Print the extension version"
 run = "cat internal/version/VERSION"
 
-[tasks.tag]
-description = "Create the annotated v<version> tag on a clean worktree"
+[tasks.release]
+description = "Check, tag, and push v<version> from a clean main; CI publishes the release"
 run = """
 set -eu
 tag="v$(cat internal/version/VERSION)"
+branch="$(git branch --show-current)"
+if [ "$branch" != main ]; then
+  echo "release from main, not ${branch:-a detached HEAD}" >&2
+  exit 2
+fi
 if [ -n "$(git status --porcelain)" ]; then
   echo 'worktree must be clean' >&2
   exit 2
 fi
-if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-  echo "tag $tag already exists" >&2
+remote_tag="$(git ls-remote --tags origin "refs/tags/$tag")"
+if [ -n "$remote_tag" ] || git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+  echo "tag $tag already exists; bump internal/version/VERSION first" >&2
   exit 2
 fi
+mise run check
 git tag -a "$tag" -m "$tag"
-"""
-
-[tasks.release]
-description = "Run the checks, tag the version, and push; CI publishes the release"
-depends = ["check"]
-run = """
-set -eu
-mise run tag
-git push origin HEAD
-git push origin "v$(cat internal/version/VERSION)"
+if ! git push --atomic origin HEAD "refs/tags/$tag"; then
+  git tag -d "$tag" >/dev/null
+  echo "push failed, so the local tag $tag was removed; fix the cause and rerun" >&2
+  exit 1
+fi
+echo "pushed main and $tag; the release workflow publishes the binaries"
 """
 
 [tasks.clean]
