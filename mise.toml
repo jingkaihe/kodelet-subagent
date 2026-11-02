@@ -3,6 +3,7 @@ go = "1.27.3"
 gofumpt = "0.12.0"
 golangci-lint = "2.15.0"
 goreleaser = "2.19.0"
+shellcheck = "0.11.0"
 
 [tasks.fmt]
 description = "Format Go sources with gofumpt, goimports, and gci"
@@ -33,6 +34,10 @@ run = "go mod tidy -diff"
 description = "Run golangci-lint"
 run = "golangci-lint run ./..."
 
+[tasks."lint:shell"]
+description = "Check install.sh with bash -n and ShellCheck"
+run = ["bash -n install.sh", "shellcheck install.sh"]
+
 [tasks.test]
 description = "Run tests with the race detector"
 env = { CGO_ENABLED = "1" }
@@ -53,7 +58,7 @@ run = "goreleaser release --snapshot --clean"
 
 [tasks.check]
 description = "Run every check required before merging"
-depends = ["fmt:check", "whitespace", "tidy:check", "lint", "test", "build", "release:check"]
+depends = ["fmt:check", "whitespace", "tidy:check", "lint", "lint:shell", "test", "build", "release:check"]
 
 [tasks.version]
 description = "Print the extension version"

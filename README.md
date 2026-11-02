@@ -19,19 +19,23 @@ Agents are stored in SQLite, so an agent interrupted by an extension restart can
 
 ## Installation
 
-Kodelet discovers executables named `kodelet-extension-*` on the runner's `PATH`, so installing the binary into a `PATH` directory is all that is needed. Download the build for your platform from the [releases page](https://github.com/jingkaihe/kodelet-subagent/releases):
+Kodelet discovers executables named `kodelet-extension-*` on the runner's `PATH`, so installing the binary into a `PATH` directory is all that is needed. To install the latest release into `~/.local/bin`:
 
 ```bash
-os="$(uname -s | tr '[:upper:]' '[:lower:]')"
-arch="$(uname -m)"
-case "$arch" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; esac
-mkdir -p ~/.local/bin
-curl -fsSL -o ~/.local/bin/kodelet-extension-subagent \
-  "https://github.com/jingkaihe/kodelet-subagent/releases/latest/download/kodelet-extension-subagent-${os}-${arch}"
-chmod +x ~/.local/bin/kodelet-extension-subagent
+curl -fsSL https://raw.githubusercontent.com/jingkaihe/kodelet-subagent/main/install.sh | bash
 ```
 
-Builds are published for Linux and macOS on amd64 and arm64, alongside a `checksums.txt` file. With Go installed, you can instead build it into `$(go env GOPATH)/bin`, which must then be on the runner's `PATH`:
+The script downloads the build for your platform (Linux or macOS, amd64 or arm64) from [GitHub Releases](https://github.com/jingkaihe/kodelet-subagent/releases), verifies it against the release's `checksums.txt`, and moves it into place, so it also upgrades a copy the runner is using. It warns when the install directory is not on `PATH`, when another `kodelet-extension-subagent` comes first on `PATH`, or when the Python plugin is still installed. It reads these environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `KODELET_SUBAGENT_VERSION` | `latest` | Version to install, such as `0.7.0`. |
+| `KODELET_SUBAGENT_INSTALL_DIR` | `~/.local` | Install prefix; the binary goes in its `bin` directory. |
+| `GH_TOKEN`, `GITHUB_TOKEN` | | GitHub token for looking up the latest version, which raises the API rate limit. Without one, the script uses `gh auth token` when the GitHub CLI is signed in. |
+
+For example, `curl -fsSL https://raw.githubusercontent.com/jingkaihe/kodelet-subagent/main/install.sh | KODELET_SUBAGENT_VERSION=0.7.0 bash` installs a specific version. The token is only sent to the GitHub API, never to the download, and a pinned version needs no lookup at all. When the API refuses the lookup, the script reads the latest version from the releases page instead.
+
+You can also download `kodelet-extension-subagent-<os>-<arch>` from the releases page yourself, or, with Go installed, build it into `$(go env GOPATH)/bin`, which must then be on the runner's `PATH`:
 
 ```bash
 go install github.com/jingkaihe/kodelet-subagent/cmd/kodelet-extension-subagent@latest
@@ -48,7 +52,7 @@ kodelet extension inspect subagent
 Releases up to 0.6.7 were a Python package on PyPI, which is no longer updated. It was installed as the `jingkaihe@kodelet-subagent` plugin. Kodelet will not start two extensions that register the same tools, so replace the plugin instead of running both:
 
 1. Stop the runner and remove the plugin with `rm -rf ~/.kodelet/plugins/jingkaihe@kodelet-subagent`.
-2. Install `kodelet-extension-subagent` on `PATH` as described above, then start the runner.
+2. Install `kodelet-extension-subagent` with the one-line installer above, then start the runner.
 
 The first time the extension opens its data directory, it imports the plugin's database from the neighboring `jingkaihe@kodelet-subagent_subagent` data directory. Existing agents can still be listed, waited on, and resumed with `followup_agent`; agents that were still running are marked interrupted. The import only happens while the new database does not exist yet, and the old database is only read, so you can delete it once you no longer need it. If the old database cannot be imported, tool calls report why; move it aside to start with an empty database.
 
@@ -73,9 +77,9 @@ Databases are upgraded automatically when the extension opens them, so `migrate`
 Tools and tasks are managed with [mise](https://mise.jdx.dev):
 
 ```bash
-mise install          # Go, golangci-lint, gofumpt, and GoReleaser
+mise install          # Go, golangci-lint, gofumpt, ShellCheck, and GoReleaser
 mise run fmt          # format with gofumpt, goimports, and gci
-mise run check        # formatting, whitespace, tidiness, lint, race tests, build, release config
+mise run check        # formatting, whitespace, tidiness, Go and shell lint, race tests, build, release config
 mise run build        # build bin/kodelet-extension-subagent
 mise run snapshot     # cross-compile unpublished release binaries into dist/
 ```

@@ -25,7 +25,7 @@ mise run fmt
 mise run check
 ```
 
-`mise run check` runs `fmt:check`, `whitespace`, `tidy:check`, `lint`, `test` (race detector), `build`, and `release:check`; each is also a task of its own. `mise run snapshot` cross-compiles the release binaries into `dist/`. The bash tool forbids `cd`; use `mise -C <repo> run <task>` and `go -C <repo> ...` instead.
+`mise run check` runs `fmt:check`, `whitespace`, `tidy:check`, `lint`, `lint:shell` (`bash -n` and ShellCheck on `install.sh`), `test` (race detector), `build`, and `release:check`; each is also a task of its own. `mise run snapshot` cross-compiles the release binaries into `dist/`. The bash tool forbids `cd`; use `mise -C <repo> run <task>` and `go -C <repo> ...` instead.
 
 Format with gofumpt (extra rules), goimports, and gci through `golangci-lint fmt`. Keep files focused rather than large, write multi-line text as raw strings, and leave no trailing whitespace anywhere, including SQL.
 
@@ -48,3 +48,5 @@ Releases up to 0.6.7 were a Python package installed as the `jingkaihe@kodelet-s
 ## Releases
 
 `internal/version/VERSION` is the sole version source. `mise run release` requires a clean `main` and a `v<version>` tag that exists neither locally nor on `origin`; it runs the checks, creates the annotated tag, and pushes `main` and the tag atomically, removing the local tag if the push fails. The release workflow verifies the tag against `VERSION`, reruns the checks, and publishes the GoReleaser binaries and `checksums.txt` to GitHub Releases.
+
+`install.sh` is served from `main` and installs the latest release, so keep its asset names (`kodelet-extension-subagent-<os>-<arch>`, `checksums.txt`) in step with `.goreleaser.yaml`. It sends a GitHub token (`GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token`) only to the API version lookup, through stdin rather than argv, and falls back to the `releases/latest` redirect when the API refuses.
