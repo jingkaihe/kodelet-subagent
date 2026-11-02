@@ -45,8 +45,9 @@ func agentNotFound(summary string) extension.ToolResult {
 	return toolError("agent not found", summary)
 }
 
-// toolResult exposes machine data as structured content while keeping
-// presentation and task progress in the result metadata.
+// toolResult exposes machine data as structured content, which keeps JSON
+// nulls, while result metadata omits nulls and adds presentation and task
+// progress.
 func toolResult(content string, data map[string]any, errorMessage string) extension.ToolResult {
 	structured := make(map[string]any, len(data))
 	for key, value := range data {
@@ -54,7 +55,36 @@ func toolResult(content string, data map[string]any, errorMessage string) extens
 			structured[key] = value
 		}
 	}
-	return extension.ToolResult{Content: content, Data: data, StructuredContent: structured, Error: errorMessage}
+	metadata, _ := withoutNulls(data).(map[string]any)
+	return extension.ToolResult{Content: content, Data: metadata, StructuredContent: structured, Error: errorMessage}
+}
+
+// withoutNulls drops nil values from nested maps.
+func withoutNulls(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		cleaned := make(map[string]any, len(typed))
+		for key, item := range typed {
+			if item != nil {
+				cleaned[key] = withoutNulls(item)
+			}
+		}
+		return cleaned
+	case []map[string]any:
+		cleaned := make([]any, 0, len(typed))
+		for _, item := range typed {
+			cleaned = append(cleaned, withoutNulls(item))
+		}
+		return cleaned
+	case []any:
+		cleaned := make([]any, 0, len(typed))
+		for _, item := range typed {
+			cleaned = append(cleaned, withoutNulls(item))
+		}
+		return cleaned
+	default:
+		return value
+	}
 }
 
 // quoted renders a name the way the original extension's messages did.

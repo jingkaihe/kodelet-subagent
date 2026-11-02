@@ -1,22 +1,19 @@
 // Command kodelet-extension-subagent is the Kodelet extension for durable,
-// named background agents. Run without arguments, it serves the extension
-// protocol over stdio; subcommands install and maintain it.
+// named background agents. Kodelet discovers it on PATH and runs it without
+// arguments to serve the extension protocol over stdio.
 package main
 
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/jingkaihe/kodelet-subagent/internal/db"
-	"github.com/jingkaihe/kodelet-subagent/internal/install"
 	"github.com/jingkaihe/kodelet-subagent/internal/paths"
 	"github.com/jingkaihe/kodelet-subagent/internal/subagent"
 	"github.com/jingkaihe/kodelet-subagent/internal/version"
@@ -31,9 +28,8 @@ const usage = `Usage: kodelet-extension-subagent [command]
 Without a command, serve the Kodelet extension protocol over stdio.
 
 Commands:
-  install [--home DIR]   Install this binary as the jingkaihe@kodelet-subagent plugin
-  migrate DATABASE       Upgrade a subagent SQLite database to the latest revision
-  version                Print the version
+  migrate DATABASE   Upgrade a subagent SQLite database to the latest revision
+  version            Print the version
 `
 
 func main() {
@@ -46,12 +42,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	var err error
 	switch args[0] {
-	case "serve":
-		return serve(stderr)
-	case "install":
-		err = installCommand(args[1:], stdout)
 	case "migrate":
-		err = migrateCommand(args[1:], stdout)
+		err = migrate(args[1:], stdout)
 	case "version", "--version":
 		_, err = fmt.Fprintln(stdout, version.Version)
 	case "help", "-h", "--help":
@@ -78,34 +70,7 @@ func serve(stderr io.Writer) int {
 	return 0
 }
 
-func installCommand(args []string, stdout io.Writer) error {
-	flags := flag.NewFlagSet("install", flag.ContinueOnError)
-	home := flags.String("home", "", "override the home directory used for installation")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if *home == "" {
-		var err error
-		if *home, err = os.UserHomeDir(); err != nil {
-			return err
-		}
-	}
-	source, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	if resolved, err := filepath.EvalSymlinks(source); err == nil {
-		source = resolved
-	}
-	installed, err := install.Plugin(*home, source)
-	if err != nil {
-		return err
-	}
-	_, err = fmt.Fprintf(stdout, "Installed Kodelet subagent extension at %s\n", installed)
-	return err
-}
-
-func migrateCommand(args []string, stdout io.Writer) error {
+func migrate(args []string, stdout io.Writer) error {
 	if len(args) != 1 {
 		return errors.New("usage: kodelet-extension-subagent migrate DATABASE")
 	}
