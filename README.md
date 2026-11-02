@@ -6,16 +6,12 @@ A Kodelet extension for running named background agents that you can wait on, st
 
 | Tool | Purpose |
 | --- | --- |
-| `spawn_agent` | Start a named background agent and return immediately. |
-| `wait_agent` | Wait for an agent's current run, with live progress, and return its result. |
-| `list_agents` | List the current conversation's agents and their status. |
-| `followup_agent` | Give an idle, failed, interrupted, or canceled agent a new task. |
+| `spawn_agent` | Start a named background agent. |
+| `wait_agent` | Wait for an agent and return its result. |
+| `list_agents` | List this conversation's agents. |
+| `followup_agent` | Give an agent a new task. |
 | `steer_agent` | Send guidance to a running agent. |
-| `cancel_agent` | Cancel an agent. It can be resumed later with `followup_agent`. |
-
-By default, a new agent starts from a fork of the current conversation. Pass `context_mode="fresh"` to start without the parent's context. Only fresh agents can run in a different `cwd`, subject to runner policy. Forks and follow-ups keep their saved directory. Background agents cannot spawn agents of their own.
-
-Agents are stored in SQLite, so an agent interrupted by an extension restart can still be resumed with `followup_agent`.
+| `cancel_agent` | Cancel a running agent. |
 
 ## Installation
 
@@ -51,15 +47,11 @@ Fresh agents use the parent conversation's model profile. To use a different pro
 
 ## Commands
 
-Run without arguments, the binary serves the Kodelet extension protocol over stdio. It also accepts:
-
-| Command | Purpose |
-| --- | --- |
-| `migrate DATABASE` | Upgrade a subagent SQLite database to the latest schema revision. |
-| `version` | Print the version. |
-| `help` | Print usage. |
-
-Databases are upgraded automatically when the extension opens them, so `migrate` is only needed to prepare a database ahead of time.
+```bash
+kodelet-extension-subagent                                   # serve the extension over stdio; Kodelet runs this
+kodelet-extension-subagent version                           # print the version
+kodelet-extension-subagent migrate path/to/subagents.sqlite  # upgrade a database ahead of time
+```
 
 ## License
 
