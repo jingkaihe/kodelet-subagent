@@ -36,6 +36,15 @@ Builds are published for Linux and macOS on amd64 and arm64, alongside a `checks
 kodelet extension inspect subagent
 ```
 
+## Upgrading from the Python package
+
+The Python package was installed as the `jingkaihe@kodelet-subagent` plugin. Kodelet will not start two extensions that register the same tools, so replace the plugin instead of running both:
+
+1. Stop the runner and remove the plugin with `rm -rf ~/.kodelet/plugins/jingkaihe@kodelet-subagent`.
+2. Install `kodelet-extension-subagent` on `PATH` as described above, then start the runner.
+
+The first time the extension opens its data directory, it imports the plugin's database from the neighboring `jingkaihe@kodelet-subagent_subagent` data directory. Existing agents can still be listed, waited on, and resumed with `followup_agent`; agents that were still running are marked interrupted. The import only happens while the new database does not exist yet, and the old database is only read, so you can delete it once you no longer need it. If the old database cannot be imported, tool calls report why; move it aside to start with an empty database.
+
 ## Model profiles
 
 Fresh agents use the parent conversation's model profile. To use a different profile, set `KODELET_SUBAGENT_PROFILE` (for example, `generic`) in the environment of the runner that hosts the extension, then restart that runner. Forked agents and follow-ups keep the conversation's saved settings.

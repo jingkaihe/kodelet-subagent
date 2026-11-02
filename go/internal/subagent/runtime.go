@@ -92,7 +92,8 @@ type RuntimeOptions struct {
 	ClientFactory ClientFactory
 	// Timing defaults to DefaultTiming.
 	Timing *Timing
-	// NewStore opens the store for a database path; it defaults to db.NewStore.
+	// NewStore opens the store for a database path. The default store imports
+	// the Python extension's database on first use.
 	NewStore func(path, runtimeID string) Store
 }
 
@@ -139,7 +140,7 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 	}
 	newStore := opts.NewStore
 	if newStore == nil {
-		newStore = func(path, runtimeID string) Store { return db.NewStore(path, runtimeID, nil) }
+		newStore = newDefaultStore
 	}
 	return &Runtime{
 		runtimeID:     runtimeID,

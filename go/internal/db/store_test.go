@@ -40,8 +40,6 @@ func newTestStore(t *testing.T, path, runtimeID string, clock Clock) *Store {
 	return store
 }
 
-//go:fix inline
-
 func steeringRows(t *testing.T, path string) [][3]any {
 	t.Helper()
 	var rows []struct {

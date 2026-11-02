@@ -48,17 +48,37 @@ type Store struct {
 	runtimeID string
 	clock     Clock
 
+	importSource string
+	onImport     func(source, target string)
+
 	mu sync.Mutex
 	db *sqlx.DB
 }
 
+// StoreOption configures NewStore.
+type StoreOption func(*Store)
+
+// ImportFrom makes a store whose database does not exist yet start from a
+// copy of source, a database written by an earlier installation. notify, when
+// set, is called after an import.
+func ImportFrom(source string, notify func(source, target string)) StoreOption {
+	return func(s *Store) {
+		s.importSource = source
+		s.onImport = notify
+	}
+}
+
 // NewStore returns a store for the database at path. Relative paths are
 // resolved against the current directory immediately.
-func NewStore(path, runtimeID string, clock Clock) *Store {
+func NewStore(path, runtimeID string, clock Clock, opts ...StoreOption) *Store {
 	if clock == nil {
 		clock = SystemClock
 	}
-	return &Store{path: paths.Resolve(paths.ExpandUser(path)), runtimeID: runtimeID, clock: clock}
+	store := &Store{path: paths.Resolve(paths.ExpandUser(path)), runtimeID: runtimeID, clock: clock}
+	for _, opt := range opts {
+		opt(store)
+	}
+	return store
 }
 
 // Path returns the resolved database path.
@@ -88,8 +108,12 @@ func (s *Store) database() (*sqlx.DB, error) {
 	if s.db != nil {
 		return s.db, nil
 	}
-	if err := Migrate(s.path); err != nil {
+	imported, err := migrate(s.path, s.importSource)
+	if err != nil {
 		return nil, err
+	}
+	if imported && s.onImport != nil {
+		s.onImport(s.importSource, s.path)
 	}
 	db, err := Open(s.path)
 	if err != nil {

@@ -76,19 +76,32 @@ func Open(path string) (*sqlx.DB, error) {
 // Migrate creates or upgrades a subagent database to HeadRevision.
 // Non-empty databases without version metadata are rejected, not adopted.
 func Migrate(path string) error {
+	_, err := migrate(path, "")
+	return err
+}
+
+// migrate is Migrate that first imports source, when set, if path does not
+// exist yet. It reports whether it imported.
+func migrate(path, source string) (bool, error) {
 	resolved := paths.Resolve(paths.ExpandUser(path))
 	if err := os.MkdirAll(filepath.Dir(resolved), 0o755); err != nil {
-		return err
+		return false, err
 	}
 	lock := initializationLock(resolved)
 	lock.Lock()
 	defer lock.Unlock()
 	unlock, err := crossProcessLock(resolved)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer unlock()
-	return bootstrapLocked(resolved)
+	imported := false
+	if source != "" {
+		if imported, err = importLocked(paths.Resolve(paths.ExpandUser(source)), resolved); err != nil {
+			return false, err
+		}
+	}
+	return imported, bootstrapLocked(resolved)
 }
 
 func bootstrapLocked(path string) error {

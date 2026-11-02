@@ -12,12 +12,19 @@ import (
 )
 
 func (s *Store) reconcileExpiredTx(tx *sqlx.Tx, now float64) (int, error) {
+	return reconcileLeasesTx(tx, now, now, "agent lease expired")
+}
+
+// reconcileLeasesTx releases active claims whose leases expire by cutoff.
+// Canceling agents whose run was canceled become canceled; other claims are
+// interrupted with message.
+func reconcileLeasesTx(tx *sqlx.Tx, cutoff, now float64, message string) (int, error) {
 	var rows []activeRow
 	if err := tx.Select(&rows, `
 		SELECT id, active_run_id, generation, status
 		FROM agents
 		WHERE status IN ('starting', 'running', 'canceling')
-		  AND (lease_expires_at IS NULL OR lease_expires_at <= ?)`, now); err != nil {
+		  AND (lease_expires_at IS NULL OR lease_expires_at <= ?)`, cutoff); err != nil {
 		return 0, err
 	}
 	reconciled := 0
@@ -32,7 +39,7 @@ func (s *Store) reconcileExpiredTx(tx *sqlx.Tx, now float64) (int, error) {
 			}
 			continue
 		}
-		if err := interruptRowTx(tx, row.ID, row.ActiveRunID, row.Generation, "agent lease expired", now); err != nil {
+		if err := interruptRowTx(tx, row.ID, row.ActiveRunID, row.Generation, message, now); err != nil {
 			return 0, err
 		}
 		reconciled++
