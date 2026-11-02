@@ -44,6 +44,16 @@ uv build
 
 Do not commit `.venv`, `dist`, caches, coverage output, or generated wheel/sdist files.
 
+## Go implementation
+
+`go/` holds the Go rewrite: a single `kodelet-extension-subagent` binary that Kodelet discovers on `PATH` (extension ID `subagent`). It mirrors the Python behavior, tool schemas, and SQLite schema; `alembic_version` stays the schema-version authority, so databases move freely between the two implementations.
+
+- `cmd/kodelet-extension-subagent` serves stdio with no arguments and also provides `migrate DATABASE` and `version`.
+- `internal/types` holds the domain model, `internal/db` the store and embedded SQL migrations (`modernc.org/sqlite` + `sqlx`), `internal/paths` path resolution, `internal/version` the embedded `VERSION`, and `internal/subagent` the runtime, tools, UI, and SDK adapters.
+- Tools and tasks are managed with mise from `go/`: `mise install`, `mise run fmt`, `mise run check` (fmt, whitespace, tidy, golangci-lint, race tests, build, GoReleaser config), and `mise run snapshot`. The bash tool forbids `cd`; use `mise -C go run <task>`.
+- Format with gofumpt (extra rules) and gci via `golangci-lint fmt`; write multi-line text as raw strings and leave no trailing whitespace anywhere, including SQL.
+- For end-to-end checks, follow the `self-test` skill in `../kodelet/.kodelet/skills/self-test`: run an isolated candidate server with `$SELF_TEST_ROOT/bin` (holding `kodelet` and `kodelet-extension-subagent`) first on `PATH`, and exercise spawn, wait, fork, steer, cancel, follow-up, forced stop, and resume.
+
 ## Migrations
 
 Alembic revisions are packaged under `src/kodelet_subagent/persistence/migrations/versions/`. Keep `alembic_version` as the sole schema-version authority.
