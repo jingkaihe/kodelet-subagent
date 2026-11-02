@@ -1,17 +1,17 @@
-// Package persistence stores durable background-agent state in SQLite.
+// Package agentdb stores durable background-agent state in SQLite.
 //
 // Runtime state transitions use explicit IMMEDIATE transactions. Every
 // worker-side update is fenced by the lease token, generation, runtime ID, and
 // lease expiry recorded when the run was claimed.
-package persistence
+package agentdb
 
 import (
 	"math"
 	"sync/atomic"
 )
 
-// DatabaseFilename is the SQLite file created in the extension data directory.
-const DatabaseFilename = "subagents.sqlite"
+// Filename is the SQLite file created in the extension data directory.
+const Filename = "subagents.sqlite"
 
 // ContextMode selects how an agent's conversation is initialized.
 type ContextMode string
@@ -79,8 +79,8 @@ const (
 	TerminalInterrupted TerminalStatus = "interrupted"
 )
 
-// RunRecord is one generation of an agent.
-type RunRecord struct {
+// Run is one generation of an agent.
+type Run struct {
 	ID          string
 	Generation  int
 	Task        string
@@ -93,8 +93,8 @@ type RunRecord struct {
 	UpdatedAt   float64
 }
 
-// AgentRecord is an agent together with a selected run.
-type AgentRecord struct {
+// Agent is an agent together with a selected run.
+type Agent struct {
 	ID                  string
 	Name                string
 	OwnerConversationID string
@@ -105,7 +105,7 @@ type AgentRecord struct {
 	Generation          int
 	CreatedAt           float64
 	UpdatedAt           float64
-	Run                 RunRecord
+	Run                 Run
 }
 
 // Lease fences worker updates to one claimed run.
@@ -143,7 +143,7 @@ func (l *Lease) WithRuntimeID(runtimeID string) *Lease {
 
 // Claim is a reserved run and the lease that owns it.
 type Claim struct {
-	Agent AgentRecord
+	Agent Agent
 	Lease *Lease
 }
 

@@ -1,4 +1,4 @@
-package persistence
+package agentdb
 
 import (
 	"context"
@@ -56,7 +56,7 @@ func (s *Store) Create(ctx context.Context, ownerID, name, task, cwd string, mod
 	agentID := newID("agt_")
 	runID := newID("run_")
 	token := newToken()
-	var agent AgentRecord
+	var agent Agent
 	var expiresAt float64
 	err = s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		expiresAt = now + LeaseDurationSeconds
@@ -102,8 +102,8 @@ func (s *Store) Create(ctx context.Context, ownerID, name, task, cwd string, mod
 }
 
 // Get returns an owned agent with its active run, or with runID when given.
-func (s *Store) Get(ctx context.Context, ownerID, agentID, runID string) (AgentRecord, error) {
-	var agent AgentRecord
+func (s *Store) Get(ctx context.Context, ownerID, agentID, runID string) (Agent, error) {
+	var agent Agent
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
 			return err
@@ -116,16 +116,16 @@ func (s *Store) Get(ctx context.Context, ownerID, agentID, runID string) (AgentR
 }
 
 // List returns an owner's agents, active agents first, most recent first.
-func (s *Store) List(ctx context.Context, ownerID string) ([]AgentRecord, error) {
+func (s *Store) List(ctx context.Context, ownerID string) ([]Agent, error) {
 	return s.ListLimit(ctx, ownerID, DefaultListLimit)
 }
 
 // ListLimit is List with an explicit limit between 1 and MaxListLimit.
-func (s *Store) ListLimit(ctx context.Context, ownerID string, limit int) ([]AgentRecord, error) {
+func (s *Store) ListLimit(ctx context.Context, ownerID string, limit int) ([]Agent, error) {
 	if limit < 1 || limit > MaxListLimit {
 		return nil, fmt.Errorf("limit must be between 1 and %d", MaxListLimit)
 	}
-	var agents []AgentRecord
+	var agents []Agent
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
 			return err
@@ -140,7 +140,7 @@ func (s *Store) ListLimit(ctx context.Context, ownerID string, limit int) ([]Age
 			LIMIT ?`, strings.TrimSpace(ownerID), limit); err != nil {
 			return err
 		}
-		agents = make([]AgentRecord, 0, len(ids))
+		agents = make([]Agent, 0, len(ids))
 		for _, id := range ids {
 			agent, err := fetchAgentTx(tx, id, "", "")
 			if err != nil {
@@ -163,7 +163,7 @@ func (s *Store) Claim(ctx context.Context, ownerID, agentID, task string) (Claim
 	}
 	runID := newID("run_")
 	token := newToken()
-	var agent AgentRecord
+	var agent Agent
 	var expiresAt float64
 	var generation int
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
@@ -255,8 +255,8 @@ func (s *Store) Abort(ctx context.Context, lease *Lease) (bool, error) {
 
 // Cancel records cancellation. Active agents move to canceling until their
 // owner finishes cleanup; inactive agents become canceled immediately.
-func (s *Store) Cancel(ctx context.Context, ownerID, agentID string) (AgentRecord, error) {
-	var agent AgentRecord
+func (s *Store) Cancel(ctx context.Context, ownerID, agentID string) (Agent, error) {
+	var agent Agent
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
 			return err

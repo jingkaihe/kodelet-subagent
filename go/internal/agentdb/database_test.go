@@ -1,4 +1,4 @@
-package persistence
+package agentdb
 
 import (
 	"os"
@@ -46,8 +46,8 @@ func names(t *testing.T, db *sqlx.DB, kind string) map[string]bool {
 }
 
 func TestFreshDatabaseUpgradesToHeadWithRequiredPragmas(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "fresh", DatabaseFilename)
-	require.NoError(t, MigrateDatabase(path))
+	path := filepath.Join(t.TempDir(), "fresh", Filename)
+	require.NoError(t, Migrate(path))
 
 	db := rawDB(t, path)
 	tables := names(t, db, "table")
@@ -66,7 +66,7 @@ func TestFreshDatabaseUpgradesToHeadWithRequiredPragmas(t *testing.T) {
 	require.Equal(t, "wal", journalMode)
 	require.Equal(t, HeadRevision, readRevision(t, path))
 
-	opened, err := OpenDatabase(path)
+	opened, err := Open(path)
 	require.NoError(t, err)
 	defer opened.Close()
 	opened.SetMaxOpenConns(1)
@@ -80,8 +80,8 @@ func TestFreshDatabaseUpgradesToHeadWithRequiredPragmas(t *testing.T) {
 }
 
 func TestFreshSchemaMatchesAlembicDDL(t *testing.T) {
-	path := filepath.Join(t.TempDir(), DatabaseFilename)
-	require.NoError(t, MigrateDatabase(path))
+	path := filepath.Join(t.TempDir(), Filename)
+	require.NoError(t, Migrate(path))
 	var agents, owner string
 	db := rawDB(t, path)
 	require.NoError(t, db.Get(&agents, "SELECT sql FROM sqlite_master WHERE name = 'agents'"))
@@ -93,7 +93,7 @@ func TestFreshSchemaMatchesAlembicDDL(t *testing.T) {
 
 func TestMigrationIsIdempotentAndPreservesManagedData(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "managed.sqlite")
-	require.NoError(t, MigrateDatabase(path))
+	require.NoError(t, Migrate(path))
 	db := rawDB(t, path)
 	db.MustExec(`
 		INSERT INTO agents (
@@ -116,8 +116,8 @@ func TestMigrationIsIdempotentAndPreservesManagedData(t *testing.T) {
 		    1001.0, 1001.0
 		)`)
 	require.NoError(t, db.Close())
-	require.NoError(t, MigrateDatabase(path))
-	require.NoError(t, MigrateDatabase(path))
+	require.NoError(t, Migrate(path))
+	require.NoError(t, Migrate(path))
 
 	var row struct {
 		Name   string `db:"name"`
@@ -135,7 +135,7 @@ func TestMigrationIsIdempotentAndPreservesManagedData(t *testing.T) {
 }
 
 func TestUpgradeFromInitialPreservesActiveAndHistoricalRows(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "upgrade", DatabaseFilename)
+	path := filepath.Join(t.TempDir(), "upgrade", Filename)
 	migrateTo(t, path, initialRevision)
 	db := rawDB(t, path)
 	db.MustExec(`PRAGMA foreign_keys = ON`)
@@ -168,8 +168,8 @@ func TestUpgradeFromInitialPreservesActiveAndHistoricalRows(t *testing.T) {
 	require.Equal(t, initialRevision, readRevision(t, path))
 	require.NoError(t, db.Close())
 
-	require.NoError(t, MigrateDatabase(path))
-	require.NoError(t, MigrateDatabase(path))
+	require.NoError(t, Migrate(path))
+	require.NoError(t, Migrate(path))
 
 	db = rawDB(t, path)
 	type joined struct {
@@ -231,19 +231,19 @@ func TestUpgradeFromInitialPreservesActiveAndHistoricalRows(t *testing.T) {
 func TestExistingEmptyDatabaseIsInitialized(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "empty.sqlite")
 	require.NoError(t, os.WriteFile(path, nil, 0o644))
-	require.NoError(t, MigrateDatabase(path))
+	require.NoError(t, Migrate(path))
 	require.Equal(t, HeadRevision, readRevision(t, path))
 }
 
 func TestConcurrentFreshMigrationsShareTheDatabaseLock(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "concurrent", DatabaseFilename)
+	path := filepath.Join(t.TempDir(), "concurrent", Filename)
 	var wg sync.WaitGroup
 	errs := make([]error, 4)
 	for i := range errs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs[i] = MigrateDatabase(path)
+			errs[i] = Migrate(path)
 		}()
 	}
 	wg.Wait()
@@ -262,7 +262,7 @@ func TestNonemptyUnversionedDatabaseIsRejectedWithoutAdoption(t *testing.T) {
 	db.MustExec("CREATE TABLE agents (id TEXT PRIMARY KEY)")
 	require.NoError(t, db.Close())
 
-	err := MigrateDatabase(path)
+	err := Migrate(path)
 	require.ErrorIs(t, err, ErrUnsupportedDatabase)
 	require.ErrorIs(t, err, ErrDatabaseBootstrap)
 	require.ErrorContains(t, err, "without Alembic metadata")
@@ -277,9 +277,9 @@ func TestNonemptyUnversionedDatabaseIsRejectedWithoutAdoption(t *testing.T) {
 }
 
 func TestDatabasePathMustBeARegularFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), DatabaseFilename)
+	path := filepath.Join(t.TempDir(), Filename)
 	require.NoError(t, os.Mkdir(path, 0o755))
-	err := MigrateDatabase(path)
+	err := Migrate(path)
 	require.ErrorIs(t, err, ErrUnsupportedDatabase)
 	require.ErrorContains(t, err, "is not a file")
 }
@@ -287,7 +287,7 @@ func TestDatabasePathMustBeARegularFile(t *testing.T) {
 func TestCorruptDatabaseIsRejected(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "corrupt.sqlite")
 	require.NoError(t, os.WriteFile(path, []byte("not a sqlite database"), 0o644))
-	err := MigrateDatabase(path)
+	err := Migrate(path)
 	require.ErrorIs(t, err, ErrUnsupportedDatabase)
 	require.ErrorContains(t, err, "failed to inspect")
 }
@@ -299,14 +299,14 @@ func TestUnknownRevisionIsRejected(t *testing.T) {
 	db.MustExec("INSERT INTO alembic_version (version_num) VALUES ('unknown_revision')")
 	require.NoError(t, db.Close())
 
-	err := MigrateDatabase(path)
+	err := Migrate(path)
 	require.ErrorIs(t, err, ErrDatabaseMigration)
 	require.ErrorContains(t, err, "failed to migrate")
 }
 
 func TestManagedDatabaseWithForeignKeyViolationsIsRejected(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "invalid-foreign-key.sqlite")
-	require.NoError(t, MigrateDatabase(path))
+	require.NoError(t, Migrate(path))
 	rawDB(t, path).MustExec(`
 		INSERT INTO runs (
 		    id, agent_id, generation, lease_token, task, status,
@@ -315,7 +315,7 @@ func TestManagedDatabaseWithForeignKeyViolationsIsRejected(t *testing.T) {
 		    'run_orphan', 'agt_missing', 1, 'token', 'orphan task',
 		    'completed', 'result', NULL, 1000.0, 1000.0, 1001.0, 1001.0
 		)`)
-	err := MigrateDatabase(path)
+	err := Migrate(path)
 	require.ErrorIs(t, err, ErrDatabaseMigration)
 	require.ErrorContains(t, err, "foreign-key violations")
 }

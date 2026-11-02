@@ -1,4 +1,4 @@
-package persistence
+package agentdb
 
 import (
 	"context"
@@ -87,12 +87,12 @@ func (s *Store) attachChildConversationTx(tx *sqlx.Tx, agent agentRow, agentID, 
 }
 
 // AttachConversation records the child conversation for an active claim.
-func (s *Store) AttachConversation(ctx context.Context, lease *Lease, conversationID string) (AgentRecord, error) {
+func (s *Store) AttachConversation(ctx context.Context, lease *Lease, conversationID string) (Agent, error) {
 	conversationID = strings.TrimSpace(conversationID)
 	if conversationID == "" {
-		return AgentRecord{}, errors.New("conversation id is required")
+		return Agent{}, errors.New("conversation id is required")
 	}
-	var agent AgentRecord
+	var agent Agent
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
 			return err
@@ -112,12 +112,12 @@ func (s *Store) AttachConversation(ctx context.Context, lease *Lease, conversati
 
 // AttachCancelingConversation records the child conversation for a claim
 // whose cancellation is still being cleaned up.
-func (s *Store) AttachCancelingConversation(ctx context.Context, lease *Lease, conversationID string) (AgentRecord, error) {
+func (s *Store) AttachCancelingConversation(ctx context.Context, lease *Lease, conversationID string) (Agent, error) {
 	conversationID = strings.TrimSpace(conversationID)
 	if conversationID == "" {
-		return AgentRecord{}, errors.New("conversation id is required")
+		return Agent{}, errors.New("conversation id is required")
 	}
-	var agent AgentRecord
+	var agent Agent
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
 			return err
@@ -136,12 +136,12 @@ func (s *Store) AttachCancelingConversation(ctx context.Context, lease *Lease, c
 }
 
 // MarkRunning records that the claimed run started in conversationID.
-func (s *Store) MarkRunning(ctx context.Context, lease *Lease, conversationID string) (AgentRecord, error) {
+func (s *Store) MarkRunning(ctx context.Context, lease *Lease, conversationID string) (Agent, error) {
 	conversationID = strings.TrimSpace(conversationID)
 	if conversationID == "" {
-		return AgentRecord{}, errors.New("conversation id is required")
+		return Agent{}, errors.New("conversation id is required")
 	}
-	var agent AgentRecord
+	var agent Agent
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
 			return err
@@ -183,7 +183,7 @@ func (s *Store) MarkRunning(ctx context.Context, lease *Lease, conversationID st
 
 // Terminal records the end of a claimed run and releases its lease. Repeating
 // an identical terminal update is idempotent.
-func (s *Store) Terminal(ctx context.Context, lease *Lease, status TerminalStatus, update TerminalUpdate) (AgentRecord, error) {
+func (s *Store) Terminal(ctx context.Context, lease *Lease, status TerminalStatus, update TerminalUpdate) (Agent, error) {
 	var desired RunStatus
 	switch status {
 	case TerminalIdle:
@@ -193,14 +193,14 @@ func (s *Store) Terminal(ctx context.Context, lease *Lease, status TerminalStatu
 	case TerminalInterrupted:
 		desired = RunInterrupted
 	default:
-		return AgentRecord{}, fmt.Errorf("unsupported terminal status: %s", status)
+		return Agent{}, fmt.Errorf("unsupported terminal status: %s", status)
 	}
 	var normalized *string
 	if update.ConversationID != nil {
 		trimmed := strings.TrimSpace(*update.ConversationID)
 		normalized = &trimmed
 	}
-	var agent AgentRecord
+	var agent Agent
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
 			return err

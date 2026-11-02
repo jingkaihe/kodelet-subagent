@@ -1,4 +1,4 @@
-package persistence
+package agentdb
 
 import (
 	"context"
@@ -102,10 +102,10 @@ func (s *Store) database() (*sqlx.DB, error) {
 	if s.db != nil {
 		return s.db, nil
 	}
-	if err := MigrateDatabase(s.path); err != nil {
+	if err := Migrate(s.path); err != nil {
 		return nil, err
 	}
-	db, err := OpenDatabase(s.path)
+	db, err := Open(s.path)
 	if err != nil {
 		return nil, err
 	}
@@ -217,22 +217,22 @@ func runRowTx(tx *sqlx.Tx, agentID, runID string) (runRow, error) {
 	return row, err
 }
 
-func fetchAgentTx(tx *sqlx.Tx, agentID, runID, ownerID string) (AgentRecord, error) {
+func fetchAgentTx(tx *sqlx.Tx, agentID, runID, ownerID string) (Agent, error) {
 	agent, err := agentRowTx(tx, agentID)
 	if err != nil {
-		return AgentRecord{}, err
+		return Agent{}, err
 	}
 	if ownerID != "" && agent.OwnerConversationID != ownerID {
-		return AgentRecord{}, newError(kindNotFound, "agent not found: "+agentID)
+		return Agent{}, newError(kindNotFound, "agent not found: "+agentID)
 	}
 	if runID == "" {
 		runID = agent.ActiveRunID
 	}
 	run, err := runRowTx(tx, agentID, runID)
 	if err != nil {
-		return AgentRecord{}, err
+		return Agent{}, err
 	}
-	return AgentRecord{
+	return Agent{
 		ID:                  agent.ID,
 		Name:                agent.Name,
 		OwnerConversationID: agent.OwnerConversationID,
@@ -243,7 +243,7 @@ func fetchAgentTx(tx *sqlx.Tx, agentID, runID, ownerID string) (AgentRecord, err
 		Generation:          agent.Generation,
 		CreatedAt:           agent.CreatedAt,
 		UpdatedAt:           agent.UpdatedAt,
-		Run: RunRecord{
+		Run: Run{
 			ID:          run.ID,
 			Generation:  run.Generation,
 			Task:        run.Task,

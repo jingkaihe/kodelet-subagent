@@ -1,4 +1,4 @@
-package persistence
+package agentdb
 
 import (
 	"context"
@@ -62,8 +62,8 @@ func TestStoreResolvesRelativeDatabasePathAtConstruction(t *testing.T) {
 	require.NoError(t, os.Mkdir(later, 0o755))
 	t.Chdir(original)
 
-	store := newTestStore(t, DatabaseFilename, "runtime-relative-path", nil)
-	expected := filepath.Join(original, DatabaseFilename)
+	store := newTestStore(t, Filename, "runtime-relative-path", nil)
+	expected := filepath.Join(original, Filename)
 	require.Equal(t, expected, store.Path())
 
 	t.Chdir(later)
@@ -74,13 +74,13 @@ func TestStoreResolvesRelativeDatabasePathAtConstruction(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "stable-path", persisted.Name)
 	require.FileExists(t, expected)
-	require.NoFileExists(t, filepath.Join(later, DatabaseFilename))
+	require.NoFileExists(t, filepath.Join(later, Filename))
 }
 
 func TestSchemaWALAndRecordsSurviveStoreReconstruction(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store := newTestStore(t, filepath.Join(dir, DatabaseFilename), "runtime-original", nil)
+	store := newTestStore(t, filepath.Join(dir, Filename), "runtime-original", nil)
 	claim, err := store.Create(ctx, "owner-1", "persistence-worker", "persist this task", dir, ContextFresh)
 	require.NoError(t, err)
 	require.NoError(t, store.Close())
@@ -103,7 +103,7 @@ func TestSchemaWALAndRecordsSurviveStoreReconstruction(t *testing.T) {
 func TestAgentNamesAreCanonicalAndUniquePerOwner(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store := newTestStore(t, filepath.Join(dir, "agent-names", DatabaseFilename), "runtime-names", nil)
+	store := newTestStore(t, filepath.Join(dir, "agent-names", Filename), "runtime-names", nil)
 	first, err := store.Create(ctx, "owner", "research-agent", "first task", dir, ContextFresh)
 	require.NoError(t, err)
 	require.Equal(t, "research-agent", first.Agent.Name)
@@ -155,11 +155,11 @@ func TestStoreLimitsAreAtomicPerOwnerAndGlobally(t *testing.T) {
 		return failed
 	}
 
-	ownerErrs := failures(run(filepath.Join(dir, "owner-limit", DatabaseFilename), 4, func(int) string { return "one-owner" }))
+	ownerErrs := failures(run(filepath.Join(dir, "owner-limit", Filename), 4, func(int) string { return "one-owner" }))
 	require.Len(t, ownerErrs, 1)
 	require.ErrorIs(t, ownerErrs[0], ErrAgentLimit)
 
-	totalErrs := failures(run(filepath.Join(dir, "total-limit", DatabaseFilename), 9, func(i int) string {
+	totalErrs := failures(run(filepath.Join(dir, "total-limit", Filename), 9, func(i int) string {
 		return "owner-" + string(rune('0'+i/3))
 	}))
 	require.Len(t, totalErrs, 1)
@@ -171,7 +171,7 @@ func TestExpiryReconciliationAndGenerationRuntimeFencing(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	clock := newMutableClock()
-	store := newTestStore(t, filepath.Join(dir, "leases", DatabaseFilename), "runtime-a", clock.now)
+	store := newTestStore(t, filepath.Join(dir, "leases", Filename), "runtime-a", clock.now)
 	claim, err := store.Create(ctx, "owner", "lease-worker", "work", dir, ContextFresh)
 	require.NoError(t, err)
 	_, err = store.MarkRunning(ctx, claim.Lease, "child-lease")
@@ -200,7 +200,7 @@ func TestCancelingLeaseExpiryRecoversToResumableCanceled(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	clock := newMutableClock()
-	owner := newTestStore(t, filepath.Join(dir, "cancel-expiry", DatabaseFilename), "runtime-owner", clock.now)
+	owner := newTestStore(t, filepath.Join(dir, "cancel-expiry", Filename), "runtime-owner", clock.now)
 	claim, err := owner.Create(ctx, "owner", "cancel-expiry-worker", "work", dir, ContextFresh)
 	require.NoError(t, err)
 	_, err = owner.MarkRunning(ctx, claim.Lease, "child-cancel-expiry")
@@ -247,7 +247,7 @@ func TestCancelingLeaseExpiryRecoversToResumableCanceled(t *testing.T) {
 func TestInterruptRuntimeOnlyTouchesItsOwnRows(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "session-end", DatabaseFilename)
+	path := filepath.Join(dir, "session-end", Filename)
 	current := newTestStore(t, path, "current-runtime", nil)
 	other := newTestStore(t, path, "other-runtime", nil)
 	currentClaim, err := current.Create(ctx, "current-owner", "current-worker", "current task", dir, ContextFresh)
@@ -272,7 +272,7 @@ func TestInterruptRuntimeOnlyTouchesItsOwnRows(t *testing.T) {
 func TestSteeringIsRunScopedAndCarriedToFollowups(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store := newTestStore(t, filepath.Join(dir, "steering", DatabaseFilename), "runtime-steering", nil)
+	store := newTestStore(t, filepath.Join(dir, "steering", Filename), "runtime-steering", nil)
 	claim, err := store.Create(ctx, "owner", "parser-worker", "long task", dir, ContextFresh)
 	require.NoError(t, err)
 	_, err = store.MarkRunning(ctx, claim.Lease, "child-steering")
@@ -330,7 +330,7 @@ func TestSteeringIsRunScopedAndCarriedToFollowups(t *testing.T) {
 func TestCancelDiscardsPendingSteeringAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store := newTestStore(t, filepath.Join(dir, DatabaseFilename), "runtime-cancel", nil)
+	store := newTestStore(t, filepath.Join(dir, Filename), "runtime-cancel", nil)
 	claim, err := store.Create(ctx, "owner", "cancel-worker", "task", dir, ContextFresh)
 	require.NoError(t, err)
 	_, err = store.MarkRunning(ctx, claim.Lease, "child-cancel")
@@ -375,7 +375,7 @@ func TestCancelDiscardsPendingSteeringAndIsIdempotent(t *testing.T) {
 func TestAbortDeletesOnlyUnstartedInitialReservations(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store := newTestStore(t, filepath.Join(dir, DatabaseFilename), "runtime-abort", nil)
+	store := newTestStore(t, filepath.Join(dir, Filename), "runtime-abort", nil)
 	claim, err := store.Create(ctx, "owner", "abort-worker", "task", dir, ContextFork)
 	require.NoError(t, err)
 	deleted, err := store.Abort(ctx, claim.Lease)
@@ -405,7 +405,7 @@ func TestAbortDeletesOnlyUnstartedInitialReservations(t *testing.T) {
 func TestTerminalIsIdempotentOnlyForIdenticalUpdates(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store := newTestStore(t, filepath.Join(dir, DatabaseFilename), "runtime-retry", newMutableClock().now)
+	store := newTestStore(t, filepath.Join(dir, Filename), "runtime-retry", newMutableClock().now)
 	claim, err := store.Create(ctx, "owner", "retry-worker", "retry update", dir, ContextFresh)
 	require.NoError(t, err)
 	_, err = store.Terminal(ctx, claim.Lease, TerminalIdle, TerminalUpdate{Result: strPtr("too early")})
@@ -429,7 +429,7 @@ func TestTerminalIsIdempotentOnlyForIdenticalUpdates(t *testing.T) {
 
 func TestCanceledContextDoesNotStartTransactions(t *testing.T) {
 	dir := t.TempDir()
-	store := newTestStore(t, filepath.Join(dir, DatabaseFilename), "runtime-context", nil)
+	store := newTestStore(t, filepath.Join(dir, Filename), "runtime-context", nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := store.Create(ctx, "owner", "never-created", "task", dir, ContextFresh)

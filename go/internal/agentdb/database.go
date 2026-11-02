@@ -1,4 +1,4 @@
-package persistence
+package agentdb
 
 import (
 	"context"
@@ -78,9 +78,9 @@ func connectionParameters() url.Values {
 	}
 }
 
-// OpenDatabase opens a pooled connection to a migrated database. Connections
+// Open opens a pooled connection to a migrated database. Connections
 // enforce foreign keys, wait for locks, and begin IMMEDIATE transactions.
-func OpenDatabase(path string) (*sqlx.DB, error) {
+func Open(path string) (*sqlx.DB, error) {
 	query := connectionParameters()
 	query.Set("_txlock", "immediate")
 	db, err := sqlx.Open("sqlite", databaseURI(path, query))
@@ -94,9 +94,9 @@ func OpenDatabase(path string) (*sqlx.DB, error) {
 	return db, nil
 }
 
-// MigrateDatabase creates or upgrades a subagent database to HeadRevision.
+// Migrate creates or upgrades a subagent database to HeadRevision.
 // Non-empty databases without version metadata are rejected, not adopted.
-func MigrateDatabase(path string) error {
+func Migrate(path string) error {
 	resolved := ResolvePath(ExpandUser(path))
 	if err := os.MkdirAll(filepath.Dir(resolved), 0o755); err != nil {
 		return err
