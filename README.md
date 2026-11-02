@@ -49,12 +49,12 @@ kodelet extension inspect subagent
 
 ## Upgrading from the Python package
 
-Releases up to 0.6.7 were a Python package on PyPI, which is no longer updated. It was installed as the `jingkaihe@kodelet-subagent` plugin. Kodelet will not start two extensions that register the same tools, so replace the plugin instead of running both:
+Versions up to 0.6.7 were a Python plugin, and Kodelet won't run it alongside this binary. With the runner stopped:
 
-1. Stop the runner and remove the plugin with `rm -rf ~/.kodelet/plugins/jingkaihe@kodelet-subagent`.
-2. Install `kodelet-extension-subagent` with the one-line installer above, then start the runner.
+1. `rm -rf ~/.kodelet/plugins/jingkaihe@kodelet-subagent`
+2. Run the installer above, then start the runner.
 
-The first time the extension opens its data directory, it imports the plugin's database from the neighboring `jingkaihe@kodelet-subagent_subagent` data directory. Existing agents can still be listed, waited on, and resumed with `followup_agent`; agents that were still running are marked interrupted. The import only happens while the new database does not exist yet, and the old database is only read, so you can delete it once you no longer need it. If the old database cannot be imported, tool calls report why; move it aside to start with an empty database.
+Existing agents are imported on first use. Any that were running come back as interrupted and can be resumed with `followup_agent`.
 
 ## Model profiles
 
