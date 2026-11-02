@@ -72,20 +72,6 @@ Run without arguments, the binary serves the Kodelet extension protocol over std
 
 Databases are upgraded automatically when the extension opens them, so `migrate` is only needed to prepare a database ahead of time.
 
-## Development
-
-Tools and tasks are managed with [mise](https://mise.jdx.dev):
-
-```bash
-mise install          # Go, golangci-lint, gofumpt, ShellCheck, and GoReleaser
-mise run fmt          # format with gofumpt, goimports, and gci
-mise run check        # formatting, whitespace, tidiness, Go and shell lint, race tests, build, release config
-mise run build        # build bin/kodelet-extension-subagent
-mise run snapshot     # cross-compile unpublished release binaries into dist/
-```
-
-To release, bump `internal/version/VERSION`, commit it on `main`, and run `mise run release`. It requires a clean `main` and an unused `v<version>` tag, runs the checks, tags the commit, and pushes `main` and the tag together. The release workflow then publishes the binaries and `checksums.txt` to GitHub Releases.
-
 ## License
 
 Licensed under the MIT License. See `LICENSE`.

@@ -1,52 +1,43 @@
 # Repository guide
 
-## Overview
+Kodelet extension for durable background agents, shipped as one Go binary, `kodelet-extension-subagent`, that Kodelet discovers on `PATH` (extension ID `subagent`).
 
-`kodelet-subagent` is a Kodelet extension for durable background agents, shipped as a single Go binary, `kodelet-extension-subagent`. Kodelet discovers it on `PATH` and derives the extension ID `subagent` from the filename.
+## Layout
 
-- `cmd/kodelet-extension-subagent` serves the extension protocol over stdio when run without arguments, and also provides `migrate DATABASE`, `version`, and `help`.
-- `internal/subagent` owns the runtime: tool handlers, descriptions, and schemas (`app.go`, `tools.go`, `wait.go`, `schemas.json`), reservations and setup (`setup.go`), live workers (`worker.go`, `heartbeat.go`, `steering.go`), cleanup and shutdown (`cleanup.go`, `shutdown.go`), widgets and progress (`ui.go`), SDK adapters (`sdk.go`), stdio serving (`serve.go`), and the legacy database import hook (`legacy.go`).
-- `internal/db` owns the SQLite store, transactional state changes, embedded migrations, and database import, using `modernc.org/sqlite` and `sqlx`.
-- `internal/types` holds the domain model, `internal/paths` path resolution, and `internal/version` the embedded `VERSION`.
+- `cmd/kodelet-extension-subagent`: stdio server, plus `migrate DATABASE`, `version`, and `help`.
+- `internal/subagent`: tools, schemas, runtime (setup, workers, steering, cleanup, shutdown), widgets, and SDK adapters.
+- `internal/db`: SQLite store (`modernc.org/sqlite`, `sqlx`), embedded migrations, and legacy import.
+- `internal/types` domain model, `internal/paths` path resolution, `internal/version` the embedded `VERSION`.
 
-Store transitions run in explicit IMMEDIATE transactions. Preserve the lease token, generation, runtime ID, and expiry checks when changing store behavior.
+## Invariants
 
-Runtime ownership covers database reservation, background-lease/named-conversation setup, the live ACP worker, and final SDK-client/background-lease cleanup. Fork parent context with `ForkConversation` (a named child) in the originating tool handler, then resume that conversation through the SDK `agent.Client`; fresh agents create a new ACP session. Use `RunAndWait`, `Steer`, and task progress attached to the session rather than an alternate execution or event API. The SDK owns bounded ACP transport and partial-startup/repeated-cancellation cleanup; do not duplicate that transport here.
-
-`liveRuns` is only the current-generation lookup for an agent; `ownedRuns` retains every generation by run ID until its cleanup completes. Failure and cancellation must retain their active database claim until client cleanup completes, with a fenced heartbeat throughout cleanup. Shutdown must stop new launches, drain reservations, cancel and await all owned runs, await runtime-owned cleanup, and only then reconcile remaining rows. ACP requires normal daemon client authentication; do not widen runner credentials. Fresh agents may select another directory within runner policy; forks and resumes retain their saved cwd.
+- Store transitions run in IMMEDIATE transactions fenced by lease token, generation, runtime ID, and expiry.
+- Forks use `ForkConversation` in the tool handler, then resume through the SDK `agent.Client`; fresh agents open a new ACP session. Use `RunAndWait`, `Steer`, and session task progress; the SDK owns the ACP transport.
+- `liveRuns` maps an agent to its current generation; `ownedRuns` keeps every run until its cleanup completes. Failed and canceled runs hold their claim, with a heartbeat, until client cleanup finishes.
+- Shutdown stops launches, drains reservations, cancels and awaits owned runs and cleanup, then reconciles rows.
+- Only fresh agents may choose a cwd; forks and resumes keep theirs.
 
 ## Development
 
-Tools and tasks are managed with mise:
-
 ```bash
-mise install
-mise run fmt
-mise run check
+mise install          # Go, golangci-lint, gofumpt, ShellCheck, GoReleaser
+mise run fmt          # gofumpt, goimports, gci
+mise run check        # fmt, whitespace, tidy, lint, shell lint, race tests, build, release config
+mise run snapshot     # cross-compile release binaries into dist/
 ```
 
-`mise run check` runs `fmt:check`, `whitespace`, `tidy:check`, `lint`, `lint:shell` (`bash -n` and ShellCheck on `install.sh`), `test` (race detector), `build`, and `release:check`; each is also a task of its own. `mise run snapshot` cross-compiles the release binaries into `dist/`. The bash tool forbids `cd`; use `mise -C <repo> run <task>` and `go -C <repo> ...` instead.
+The bash tool forbids `cd`; use `mise -C <repo> run <task>` and `go -C <repo> ...`. Keep files small, write multi-line text as raw strings, and leave no trailing whitespace, including in SQL. Do not commit `bin/` or `dist/`.
 
-Format with gofumpt (extra rules), goimports, and gci through `golangci-lint fmt`. Keep files focused rather than large, write multi-line text as raw strings, and leave no trailing whitespace anywhere, including SQL.
-
-Do not commit `bin/`, `dist/`, or other build output.
-
-For end-to-end checks, follow the `self-test` skill in `../kodelet/.kodelet/skills/self-test`: run an isolated candidate server with `$SELF_TEST_ROOT/bin` (holding `kodelet` and `kodelet-extension-subagent`) first on `PATH`, and exercise spawn, wait, fork, steer, cancel, follow-up, forced stop, and resume.
+For end-to-end checks, follow `../kodelet/.kodelet/skills/self-test` with `kodelet` and `kodelet-extension-subagent` first on the candidate's `PATH`.
 
 ## Migrations
 
-Migrations are SQL files embedded from `internal/db/migrations/` and listed in order in `internal/db/migrate.go`; update `HeadRevision` with each new one. Each runs in its own transaction. The `alembic_version` table, inherited from the earlier Python implementation, remains the sole schema-version authority.
-
-Non-empty databases without version metadata are rejected rather than adopted or stamped. Add an explicit migration for every schema change.
-
-When adding a migration, test a fresh database, upgrade from the previous revision, repeated initialization, preservation of active and historical rows, and import of a database at the previous revision.
+Add one SQL file per schema change under `internal/db/migrations/`, list it in `internal/db/migrate.go`, and bump `HeadRevision`. `alembic_version` stays the version authority; unversioned non-empty databases are rejected. Test fresh, upgraded, repeated, and imported databases.
 
 ## Legacy import
 
-Releases up to 0.6.7 were a Python package installed as the `jingkaihe@kodelet-subagent` plugin, whose data lives in the `jingkaihe@kodelet-subagent_subagent` data directory. On first use, the default store imports that database (`internal/subagent/legacy.go`, `internal/db/import.go`). The import only runs while the new database does not exist, is staged, upgraded, and verified before it is renamed into place, never writes to the source, and interrupts claims that were active in the copy because the old installation is assumed to have stopped.
+On first use, the store imports the Python plugin's `jingkaihe@kodelet-subagent_subagent` database read-only, interrupting its active claims (`internal/db/import.go`).
 
 ## Releases
 
-`internal/version/VERSION` is the sole version source. `mise run release` requires a clean `main` and a `v<version>` tag that exists neither locally nor on `origin`; it runs the checks, creates the annotated tag, and pushes `main` and the tag atomically, removing the local tag if the push fails. The release workflow verifies the tag against `VERSION`, reruns the checks, and publishes the GoReleaser binaries and `checksums.txt` to GitHub Releases.
-
-`install.sh` is served from `main` and installs the latest release, so keep its asset names (`kodelet-extension-subagent-<os>-<arch>`, `checksums.txt`) in step with `.goreleaser.yaml`. It sends a GitHub token (`GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token`) only to the API version lookup, through stdin rather than argv, and falls back to the `releases/latest` redirect when the API refuses.
+Bump `internal/version/VERSION`, commit on `main`, and run `mise run release`; the tag's workflow publishes the GoReleaser binaries. Keep `install.sh` asset names in step with `.goreleaser.yaml`.
