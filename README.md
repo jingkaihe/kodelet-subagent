@@ -19,31 +19,20 @@ Agents are stored in SQLite, so an agent interrupted by an extension restart can
 
 ## Installation
 
-Kodelet discovers executables named `kodelet-extension-*` on the runner's `PATH`, so installing the binary into a `PATH` directory is all that is needed. To install the latest release into `~/.local/bin`:
+Kodelet runs any `kodelet-extension-*` executable on the runner's `PATH`. Install the binary, then restart the runner:
 
 ```bash
+# Latest release into ~/.local/bin
 curl -fsSL https://raw.githubusercontent.com/jingkaihe/kodelet-subagent/main/install.sh | bash
-```
 
-The script downloads the build for your platform (Linux or macOS, amd64 or arm64) from [GitHub Releases](https://github.com/jingkaihe/kodelet-subagent/releases), verifies it against the release's `checksums.txt`, and moves it into place, so it also upgrades a copy the runner is using. It warns when the install directory is not on `PATH`, when another `kodelet-extension-subagent` comes first on `PATH`, or when the Python plugin is still installed. It reads these environment variables:
+# A specific version, or another prefix (installs into <prefix>/bin)
+curl -fsSL https://raw.githubusercontent.com/jingkaihe/kodelet-subagent/main/install.sh | KODELET_SUBAGENT_VERSION=0.7.0 bash
+curl -fsSL https://raw.githubusercontent.com/jingkaihe/kodelet-subagent/main/install.sh | KODELET_SUBAGENT_INSTALL_DIR=/usr/local bash
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `KODELET_SUBAGENT_VERSION` | `latest` | Version to install, such as `0.7.0`. |
-| `KODELET_SUBAGENT_INSTALL_DIR` | `~/.local` | Install prefix; the binary goes in its `bin` directory. |
-| `GH_TOKEN`, `GITHUB_TOKEN` | | GitHub token for looking up the latest version, which raises the API rate limit. Without one, the script uses `gh auth token` when the GitHub CLI is signed in. |
-
-For example, `curl -fsSL https://raw.githubusercontent.com/jingkaihe/kodelet-subagent/main/install.sh | KODELET_SUBAGENT_VERSION=0.7.0 bash` installs a specific version. The token is only sent to the GitHub API, never to the download, and a pinned version needs no lookup at all. When the API refuses the lookup, the script reads the latest version from the releases page instead.
-
-You can also download `kodelet-extension-subagent-<os>-<arch>` from the releases page yourself, or, with Go installed, build it into `$(go env GOPATH)/bin`, which must then be on the runner's `PATH`:
-
-```bash
+# Or build from source into $(go env GOPATH)/bin
 go install github.com/jingkaihe/kodelet-subagent/cmd/kodelet-extension-subagent@latest
-```
 
-Restart the runner after installing, then verify that it discovers the extension:
-
-```bash
+# Check that the runner finds it
 kodelet extension inspect subagent
 ```
 
