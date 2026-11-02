@@ -3,6 +3,8 @@ module github.com/jingkaihe/kodelet-subagent
 go 1.27.3
 
 require (
+	github.com/google/jsonschema-go v0.4.3
+	github.com/jingkaihe/kodelet/sdk/go v0.0.0-20261101224316-fb5dac51d9e4
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/stretchr/testify v1.12.1
 	modernc.org/sqlite v1.61.1
