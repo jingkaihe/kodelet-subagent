@@ -577,6 +577,12 @@ func (s *fakeSession) Steer(_ context.Context, message string) (agent.SteerResul
 	return result, nil
 }
 
+func (s *fakeSession) closes() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closeCalls
+}
+
 func (s *fakeSession) steers() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
