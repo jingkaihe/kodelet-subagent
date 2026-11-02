@@ -29,3 +29,32 @@ jobs:
       - run: uv run -- pytest -q
       - if: matrix.python-version == '3.14'
         run: uv build
+
+  go:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v5
+        with:
+          working_directory: go
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ~/.cache/golangci-lint
+            ~/Library/Caches/go-build
+            ~/Library/Caches/golangci-lint
+          key: go-${{ runner.os }}-${{ hashFiles('go/go.sum', 'go/mise.toml') }}
+          restore-keys: go-${{ runner.os }}-
+      - run: mise run check
+      - if: matrix.os == 'ubuntu-latest'
+        run: mise run snapshot
