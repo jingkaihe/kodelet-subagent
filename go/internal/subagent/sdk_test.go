@@ -147,7 +147,7 @@ func TestSDKWaitPreservesTerminalSnapshotsAndPartialResults(t *testing.T) {
 			switch status {
 			case "failed", "interrupted":
 				_, err = store.Terminal(f.ctx, claim.Lease, types.TerminalStatus(status), types.TerminalUpdate{
-					Error: strPtr("worker stopped"), Result: strPtr("partial answer"),
+					Error: new("worker stopped"), Result: new("partial answer"),
 				})
 				require.NoError(t, err)
 			default:

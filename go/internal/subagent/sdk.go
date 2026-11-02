@@ -58,7 +58,7 @@ type sdkToolCall struct {
 }
 
 func newSDKToolCall(tc *extension.ToolContext) ToolCall {
-	return sdkToolCall{sdkCall: sdkCall{ctx: &tc.CallContext}, tool: tc}
+	return sdkToolCall{ctx: &tc.CallContext, tool: tc}
 }
 
 func (c sdkToolCall) Update(ctx context.Context, content string, data map[string]any) error {

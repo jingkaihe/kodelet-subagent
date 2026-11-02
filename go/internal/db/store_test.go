@@ -41,7 +41,7 @@ func newTestStore(t *testing.T, path, runtimeID string, clock Clock) *Store {
 	return store
 }
 
-func strPtr(value string) *string { return &value }
+//go:fix inline
 
 func steeringRows(t *testing.T, path string) [][3]any {
 	t.Helper()
@@ -140,11 +140,9 @@ func TestStoreLimitsAreAtomicPerOwnerAndGlobally(t *testing.T) {
 		errs := make([]error, count)
 		var wg sync.WaitGroup
 		for i, store := range stores {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				_, errs[i] = store.Create(ctx, owner(i), "agent-"+string(rune('a'+i)), "task", dir, types.ContextFresh)
-			}()
+			})
 		}
 		wg.Wait()
 		return errs
@@ -301,7 +299,7 @@ func TestSteeringIsRunScopedAndCarriedToFollowups(t *testing.T) {
 	require.True(t, acknowledged)
 
 	terminal, err := store.Terminal(ctx, claim.Lease, types.TerminalIdle, types.TerminalUpdate{
-		ConversationID: strPtr("child-steering"), Result: strPtr("done"),
+		ConversationID: new("child-steering"), Result: new("done"),
 	})
 	require.NoError(t, err)
 	require.Equal(t, types.RunCompleted, terminal.Run.Status)
@@ -368,7 +366,7 @@ func TestCancelDiscardsPendingSteeringAndIsIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.MarkRunning(ctx, idle.Lease, "child-idle")
 	require.NoError(t, err)
-	_, err = store.Terminal(ctx, idle.Lease, types.TerminalIdle, types.TerminalUpdate{Result: strPtr("done")})
+	_, err = store.Terminal(ctx, idle.Lease, types.TerminalIdle, types.TerminalUpdate{Result: new("done")})
 	require.NoError(t, err)
 	canceled, err := store.Cancel(ctx, "owner", idle.Agent.ID)
 	require.NoError(t, err)
@@ -412,13 +410,13 @@ func TestTerminalIsIdempotentOnlyForIdenticalUpdates(t *testing.T) {
 	store := newTestStore(t, filepath.Join(dir, Filename), "runtime-retry", newMutableClock().now)
 	claim, err := store.Create(ctx, "owner", "retry-worker", "retry update", dir, types.ContextFresh)
 	require.NoError(t, err)
-	_, err = store.Terminal(ctx, claim.Lease, types.TerminalIdle, types.TerminalUpdate{Result: strPtr("too early")})
+	_, err = store.Terminal(ctx, claim.Lease, types.TerminalIdle, types.TerminalUpdate{Result: new("too early")})
 	require.ErrorIs(t, err, ErrAgentConflict)
 	require.ErrorContains(t, err, "agent must be running before becoming idle")
 	_, err = store.MarkRunning(ctx, claim.Lease, "child-retry")
 	require.NoError(t, err)
 
-	update := types.TerminalUpdate{ConversationID: strPtr("child-retry"), Result: strPtr("final answer")}
+	update := types.TerminalUpdate{ConversationID: new("child-retry"), Result: new("final answer")}
 	_, err = store.Terminal(ctx, claim.Lease, types.TerminalIdle, update)
 	require.NoError(t, err)
 	repeated, err := store.Terminal(ctx, claim.Lease, types.TerminalIdle, update)
@@ -426,7 +424,7 @@ func TestTerminalIsIdempotentOnlyForIdenticalUpdates(t *testing.T) {
 	require.Equal(t, types.RunCompleted, repeated.Run.Status)
 	require.Equal(t, "final answer", *repeated.Run.Result)
 	_, err = store.Terminal(ctx, claim.Lease, types.TerminalIdle, types.TerminalUpdate{
-		ConversationID: strPtr("child-retry"), Result: strPtr("different answer"),
+		ConversationID: new("child-retry"), Result: new("different answer"),
 	})
 	require.ErrorIs(t, err, ErrLeaseLost)
 }

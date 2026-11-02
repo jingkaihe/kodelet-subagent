@@ -322,7 +322,7 @@ func TestTerminalCancelResponseReloadsConcurrentGeneration(t *testing.T) {
 	canceled := f.cancel(call, id)
 	require.Contains(t, canceled.Content, "agent has since changed generation")
 	require.Equal(t, raced.Lease.RunID, str(canceled, "run_id"))
-	_, err := hooks.Terminal(f.ctx, raced.Lease, types.TerminalInterrupted, types.TerminalUpdate{Error: strPtr("test cleanup")})
+	_, err := hooks.Terminal(f.ctx, raced.Lease, types.TerminalInterrupted, types.TerminalUpdate{Error: new("test cleanup")})
 	require.NoError(t, err)
 }
 

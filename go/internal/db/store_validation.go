@@ -85,14 +85,14 @@ func (s *Store) validateCancelingLeaseRows(agent agentRow, run runRow, lease *ty
 	return nil
 }
 
-func (s *Store) validateCancelingLeaseTx(tx *sqlx.Tx, lease *types.Lease, now float64) (agentRow, runRow, error) {
+func (s *Store) validateCancelingLeaseTx(tx *sqlx.Tx, lease *types.Lease, now float64) (agentRow, error) {
 	agent, err := agentRowTx(tx, lease.AgentID)
 	if err != nil {
-		return agent, runRow{}, err
+		return agent, err
 	}
 	run, err := runRowTx(tx, lease.AgentID, lease.RunID)
 	if err != nil {
-		return agent, run, err
+		return agent, err
 	}
-	return agent, run, s.validateCancelingLeaseRows(agent, run, lease, now)
+	return agent, s.validateCancelingLeaseRows(agent, run, lease, now)
 }

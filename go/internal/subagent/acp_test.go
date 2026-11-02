@@ -160,7 +160,7 @@ func readRequests(t *testing.T, path string) []map[string]any {
 	}
 	require.NoError(t, err)
 	var requests []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
 		if line == "" {
 			continue
 		}

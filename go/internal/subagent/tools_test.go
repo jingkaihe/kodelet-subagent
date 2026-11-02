@@ -12,7 +12,7 @@ import (
 	"github.com/jingkaihe/kodelet-subagent/internal/types"
 )
 
-func strPtr(value string) *string { return &value }
+//go:fix inline
 
 func TestSpawnForkAndFreshWaitAndListOwnership(t *testing.T) {
 	f := newFixture(t)
@@ -172,7 +172,7 @@ func TestFollowupReforksWhenInterruptedBeforeAttachment(t *testing.T) {
 	store := f.store(call)
 	initial, err := store.Create(f.ctx, "owner-1", "setup-agent", "initial setup", f.cwd, types.ContextFork)
 	require.NoError(t, err)
-	interrupted, err := store.Terminal(f.ctx, initial.Lease, types.TerminalInterrupted, types.TerminalUpdate{Error: strPtr("setup interrupted")})
+	interrupted, err := store.Terminal(f.ctx, initial.Lease, types.TerminalInterrupted, types.TerminalUpdate{Error: new("setup interrupted")})
 	require.NoError(t, err)
 	require.Nil(t, interrupted.ConversationID)
 
@@ -209,7 +209,7 @@ func TestLegacyAgentCanResumeWithoutDelegationMetadata(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.MarkRunning(f.ctx, claim.Lease, "legacy-conversation")
 	require.NoError(t, err)
-	_, err = store.Terminal(f.ctx, claim.Lease, types.TerminalIdle, types.TerminalUpdate{Result: strPtr("old result")})
+	_, err = store.Terminal(f.ctx, claim.Lease, types.TerminalIdle, types.TerminalUpdate{Result: new("old result")})
 	require.NoError(t, err)
 
 	result := f.followup(call, claim.Agent.ID, "resume")
@@ -231,7 +231,7 @@ func TestForkCWDRejectsDifferentDirectoriesBeforeSetup(t *testing.T) {
 	require.NoError(t, os.Symlink(outside, filepath.Join(f.cwd, "escape")))
 	require.NoError(t, os.Mkdir(filepath.Join(f.cwd, "nested"), 0o755))
 	for _, cwd := range []string{outside, "../outside", "escape", "nested"} {
-		result := f.spawn(call, SpawnAgentInput{Name: "forked-agent", Task: "work", CWD: strPtr(cwd)})
+		result := f.spawn(call, SpawnAgentInput{Name: "forked-agent", Task: "work", CWD: new(cwd)})
 		require.Equal(t, "spawn_agent failed: context_mode='fork' requires the current workspace cwd", result.Error, cwd)
 	}
 	require.Empty(t, f.runtime.stores)
@@ -245,7 +245,7 @@ func TestForkCWDAcceptsPathsResolvingToCurrentWorkspace(t *testing.T) {
 	call := f.call("owner-1")
 	alias := filepath.Join(f.root, "workspace-alias")
 	require.NoError(t, os.Symlink(f.cwd, alias))
-	for index, cwd := range []*string{nil, strPtr(f.cwd), strPtr("."), strPtr("../workspace"), strPtr(alias)} {
+	for index, cwd := range []*string{nil, new(f.cwd), new("."), new("../workspace"), new(alias)} {
 		names := []string{"forked-agent", "forked-agent-one", "forked-agent-two", "forked-agent-three", "forked-agent-four"}
 		result := f.spawn(call, SpawnAgentInput{Name: names[index], Task: "work", CWD: cwd})
 		require.Equal(t, "result for work", f.wait(call, agentID(t, result), 1000).Content)
@@ -263,7 +263,7 @@ func TestFreshCWDAcceptsAbsoluteRelativeAndSymlinkSiblingDirectories(t *testing.
 	require.NoError(t, os.Symlink(outside, filepath.Join(f.cwd, "escape")))
 	for index, cwd := range []string{outside, "../outside", "escape"} {
 		names := []string{"outside-agent", "outside-agent-one", "outside-agent-two"}
-		result := f.spawn(call, SpawnAgentInput{Name: names[index], Task: "work", CWD: strPtr(cwd), ContextMode: types.ContextFresh})
+		result := f.spawn(call, SpawnAgentInput{Name: names[index], Task: "work", CWD: new(cwd), ContextMode: types.ContextFresh})
 		require.Equal(t, "result for work", f.wait(call, agentID(t, result), 1000).Content)
 		options := f.acp.client(t, -1).options(t)
 		require.Equal(t, outside, options.CWD)
@@ -283,7 +283,7 @@ func TestSpawnRejectsMissingAndNonDirectoryCWD(t *testing.T) {
 		file:      "spawn_agent failed: cwd is not a directory: " + file,
 	}
 	for cwd, expected := range cases {
-		result := f.spawn(call, SpawnAgentInput{Name: "fresh-agent", Task: "work", CWD: strPtr(cwd), ContextMode: types.ContextFresh})
+		result := f.spawn(call, SpawnAgentInput{Name: "fresh-agent", Task: "work", CWD: new(cwd), ContextMode: types.ContextFresh})
 		require.Equal(t, expected, result.Error)
 	}
 }
@@ -298,7 +298,7 @@ func TestFollowupPreservesLegacySiblingCWD(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.MarkRunning(f.ctx, claim.Lease, "old-conversation")
 	require.NoError(t, err)
-	_, err = store.Terminal(f.ctx, claim.Lease, types.TerminalIdle, types.TerminalUpdate{Result: strPtr("old output")})
+	_, err = store.Terminal(f.ctx, claim.Lease, types.TerminalIdle, types.TerminalUpdate{Result: new("old output")})
 	require.NoError(t, err)
 
 	require.Empty(t, f.followup(call, claim.Agent.ID, "continue").Error)

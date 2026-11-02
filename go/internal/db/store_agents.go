@@ -21,7 +21,8 @@ func checkLimitsTx(tx *sqlx.Tx, ownerID string) error {
 	}
 	if ownerCount >= MaxActiveAgentsPerConversation {
 		return newError(kindLimit, fmt.Sprintf(
-			"this conversation already has the maximum of %d active agents", MaxActiveAgentsPerConversation))
+			"this conversation already has the maximum of %d active agents", MaxActiveAgentsPerConversation,
+		))
 	}
 	var totalCount int
 	if err := tx.Get(&totalCount, `
@@ -31,7 +32,8 @@ func checkLimitsTx(tx *sqlx.Tx, ownerID string) error {
 	}
 	if totalCount >= MaxActiveAgentsTotal {
 		return newError(kindLimit, fmt.Sprintf(
-			"this extension already has the maximum of %d active agents", MaxActiveAgentsTotal))
+			"this extension already has the maximum of %d active agents", MaxActiveAgentsTotal,
+		))
 	}
 	return nil
 }

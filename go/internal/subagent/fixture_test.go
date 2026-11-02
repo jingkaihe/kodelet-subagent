@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -148,12 +149,7 @@ func (f *fixture) waitForStatus(store Store, owner, agentID string, statuses ...
 	var agent types.Agent
 	waitUntil(f.t, func() bool {
 		agent = f.get(store, owner, agentID)
-		for _, status := range statuses {
-			if agent.Run.Status == status {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(statuses, agent.Run.Status)
 	})
 	return agent
 }

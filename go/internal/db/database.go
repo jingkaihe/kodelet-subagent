@@ -250,7 +250,7 @@ func runMigrationsTo(path, target string) error {
 			}
 		}
 		if index < 0 {
-			return fmt.Errorf("Can't locate revision identified by '%s'", revisions[0])
+			return fmt.Errorf("can't locate revision identified by '%s'", revisions[0])
 		}
 		start = index + 1
 	default:
@@ -292,6 +292,16 @@ func applyMigration(ctx context.Context, db *sqlx.DB, step migration, index int)
 	return tx.Commit()
 }
 
+func hasForeignKeyViolations(db *sqlx.DB) (bool, error) {
+	rows, err := db.Query("PRAGMA foreign_key_check")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	violations := rows.Next()
+	return violations, rows.Err()
+}
+
 func verifyMigratedDatabase(path string) error {
 	db, err := singleConnection(databaseURI(path, url.Values{"_pragma": {fmt.Sprintf("busy_timeout(%d)", SQLiteBusyTimeoutMS)}}))
 	if err != nil {
@@ -309,12 +319,8 @@ func verifyMigratedDatabase(path string) error {
 	if err := db.Select(&revisions, "SELECT version_num FROM alembic_version ORDER BY version_num"); err != nil {
 		return verifyErr(err)
 	}
-	rows, err := db.Query("PRAGMA foreign_key_check")
+	violations, err := hasForeignKeyViolations(db)
 	if err != nil {
-		return verifyErr(err)
-	}
-	violations := rows.Next()
-	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return verifyErr(err)
 	}
 	if !strings.EqualFold(quickCheck, "ok") {

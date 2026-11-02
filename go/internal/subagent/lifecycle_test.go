@@ -22,8 +22,8 @@ func (f *fixture) startShutdown() <-chan error {
 func requirePending(t *testing.T, done <-chan error) {
 	t.Helper()
 	select {
-	case <-done:
-		t.Fatal("finished early")
+	case err := <-done:
+		t.Fatalf("finished early: %v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 }
@@ -207,17 +207,17 @@ func TestTerminalRetryAndIdempotency(t *testing.T) {
 	live := f.runtime.liveRunFromClaim(claim, "retry update", hooks)
 	live.setConversationID("child-retry")
 
-	committed, err := f.runtime.safeWorkerTerminal(f.ctx, live, types.TerminalIdle, strPtr("final answer"), nil)
+	committed, err := f.runtime.safeWorkerTerminal(f.ctx, live, types.TerminalIdle, new("final answer"), nil)
 	require.NoError(t, err)
 	require.True(t, committed)
 	require.Equal(t, 3, attempts)
 
-	update := types.TerminalUpdate{ConversationID: strPtr("child-retry"), Result: strPtr("final answer")}
+	update := types.TerminalUpdate{ConversationID: new("child-retry"), Result: new("final answer")}
 	repeated, err := store.Terminal(f.ctx, claim.Lease, types.TerminalIdle, update)
 	require.NoError(t, err)
 	require.Equal(t, types.RunCompleted, repeated.Run.Status)
 	require.Equal(t, "final answer", *repeated.Run.Result)
-	update.Result = strPtr("different answer")
+	update.Result = new("different answer")
 	_, err = store.Terminal(f.ctx, claim.Lease, types.TerminalIdle, update)
 	require.Error(t, err)
 }
@@ -238,7 +238,7 @@ func TestTerminalUpdateDoesNotRetryNonTransientStoreErrors(t *testing.T) {
 	live := f.runtime.liveRunFromClaim(claim, "fail once", hooks)
 	live.setConversationID("child-error")
 
-	committed, err := f.runtime.safeWorkerTerminal(f.ctx, live, types.TerminalIdle, strPtr("unreachable"), nil)
+	committed, err := f.runtime.safeWorkerTerminal(f.ctx, live, types.TerminalIdle, new("unreachable"), nil)
 	require.NoError(t, err)
 	require.False(t, committed)
 	require.Equal(t, 1, attempts)

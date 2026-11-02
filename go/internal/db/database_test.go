@@ -240,11 +240,9 @@ func TestConcurrentFreshMigrationsShareTheDatabaseLock(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, 4)
 	for i := range errs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			errs[i] = Migrate(path)
-		}()
+		})
 	}
 	wg.Wait()
 	for _, err := range errs {

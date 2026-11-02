@@ -30,15 +30,6 @@ func newEvent() *event { return &event{ch: make(chan struct{})} }
 
 func (e *event) set() { e.once.Do(func() { close(e.ch) }) }
 
-func (e *event) isSet() bool {
-	select {
-	case <-e.ch:
-		return true
-	default:
-		return false
-	}
-}
-
 func (e *event) wait(t *testing.T) {
 	t.Helper()
 	select {

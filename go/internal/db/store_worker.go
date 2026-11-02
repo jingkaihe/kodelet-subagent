@@ -124,7 +124,7 @@ func (s *Store) AttachCancelingConversation(ctx context.Context, lease *types.Le
 		if _, err := s.reconcileExpiredTx(tx, now); err != nil {
 			return err
 		}
-		agentRow, _, err := s.validateCancelingLeaseTx(tx, lease, now)
+		agentRow, err := s.validateCancelingLeaseTx(tx, lease, now)
 		if err != nil {
 			return err
 		}
@@ -274,7 +274,7 @@ func (s *Store) renewLease(ctx context.Context, lease *types.Lease, canceling bo
 		}
 		var err error
 		if canceling {
-			_, _, err = s.validateCancelingLeaseTx(tx, lease, now)
+			_, err = s.validateCancelingLeaseTx(tx, lease, now)
 		} else {
 			_, _, err = s.validateActiveLeaseTx(tx, lease, now)
 		}
