@@ -3,9 +3,9 @@ package db
 import (
 	"crypto/subtle"
 
-	"github.com/jingkaihe/kodelet-subagent/internal/types"
-
 	"github.com/jmoiron/sqlx"
+
+	"github.com/jingkaihe/kodelet-subagent/internal/types"
 )
 
 func tokensEqual(a, b string) bool {

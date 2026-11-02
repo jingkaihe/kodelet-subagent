@@ -14,11 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jingkaihe/kodelet-subagent/internal/paths"
-
-	"github.com/jingkaihe/kodelet-subagent/internal/types"
-
 	"github.com/jmoiron/sqlx"
+
+	"github.com/jingkaihe/kodelet-subagent/internal/paths"
+	"github.com/jingkaihe/kodelet-subagent/internal/types"
 )
 
 // Store limits and lease settings.

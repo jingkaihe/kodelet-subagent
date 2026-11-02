@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jingkaihe/kodelet-subagent/internal/types"
-
 	"github.com/jmoiron/sqlx"
+
+	"github.com/jingkaihe/kodelet-subagent/internal/types"
 )
 
 func checkLimitsTx(tx *sqlx.Tx, ownerID string) error {

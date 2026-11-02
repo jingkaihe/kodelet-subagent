@@ -9,11 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jingkaihe/kodelet-subagent/internal/paths"
-
 	"github.com/jingkaihe/kodelet/sdk/go/extension"
 
 	"github.com/jingkaihe/kodelet-subagent/internal/db"
+	"github.com/jingkaihe/kodelet-subagent/internal/paths"
 	"github.com/jingkaihe/kodelet-subagent/internal/types"
 )
 

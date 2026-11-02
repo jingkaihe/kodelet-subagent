@@ -8,9 +8,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/jingkaihe/kodelet-subagent/internal/types"
-
 	"github.com/jmoiron/sqlx"
+
+	"github.com/jingkaihe/kodelet-subagent/internal/types"
 )
 
 // EnqueueSteering queues guidance for a running agent's current run.

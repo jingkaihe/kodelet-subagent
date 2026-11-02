@@ -7,11 +7,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jingkaihe/kodelet-subagent/internal/paths"
-
-	"github.com/jingkaihe/kodelet-subagent/internal/types"
-
 	"github.com/stretchr/testify/require"
+
+	"github.com/jingkaihe/kodelet-subagent/internal/paths"
+	"github.com/jingkaihe/kodelet-subagent/internal/types"
 )
 
 type mutableClock struct {

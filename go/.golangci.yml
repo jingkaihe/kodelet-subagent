@@ -59,9 +59,15 @@ linters:
 
 formatters:
   enable:
+    - gci
     - gofumpt
     - goimports
   settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule
     gofumpt:
       extra:
         group-params: true

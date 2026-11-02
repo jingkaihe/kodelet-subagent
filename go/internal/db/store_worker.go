@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jingkaihe/kodelet-subagent/internal/types"
-
 	"github.com/jmoiron/sqlx"
+
+	"github.com/jingkaihe/kodelet-subagent/internal/types"
 )
 
 func (s *Store) reconcileExpiredTx(tx *sqlx.Tx, now float64) (int, error) {
