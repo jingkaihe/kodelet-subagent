@@ -21,8 +21,9 @@ func legacyDatabasePath(path string) string {
 
 // newDefaultStore opens path, importing the Python extension's agents the
 // first time this extension uses its data directory.
-func newDefaultStore(path, runtimeID string) Store {
-	return db.NewStore(path, runtimeID, nil, db.ImportFrom(legacyDatabasePath(path), reportImport))
+func newDefaultStore(path, runtimeID string, mailboxEnabled bool) Store {
+	return db.NewStore(path, runtimeID, nil,
+		db.ImportFrom(legacyDatabasePath(path), reportImport), db.MailboxEnabled(mailboxEnabled))
 }
 
 func reportImport(source, target string) {

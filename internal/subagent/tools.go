@@ -60,6 +60,11 @@ func (a *Application) spawn(ctx context.Context, input SpawnAgentInput, name, ta
 		return types.Claim{}, nil, err
 	}
 	claim, err := a.runtime.reserveClaim(ctx, func(ctx context.Context) (types.Claim, error) {
+		if a.runtime.mailboxEnabled {
+			if _, err := store.ResolveMailbox(ctx, owner, true); err != nil {
+				return types.Claim{}, err
+			}
+		}
 		return store.Create(ctx, owner, name, task, cwd, input.ContextMode)
 	}, task, store, true)
 	if err != nil {
@@ -116,6 +121,11 @@ func (a *Application) followup(ctx context.Context, agentID, task string, call T
 		return types.Claim{}, nil, errors.New("agent cancellation is still in progress; retry followup_agent shortly")
 	}
 	claim, err := a.runtime.reserveClaim(ctx, func(ctx context.Context) (types.Claim, error) {
+		if a.runtime.mailboxEnabled {
+			if _, err := store.ResolveMailbox(ctx, owner, true); err != nil {
+				return types.Claim{}, err
+			}
+		}
 		return store.Claim(ctx, owner, agentID, task)
 	}, task, store, false)
 	if err != nil {

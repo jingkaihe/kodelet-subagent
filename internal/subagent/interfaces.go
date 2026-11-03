@@ -86,6 +86,11 @@ type Store interface {
 	NextSteering(ctx context.Context, lease *types.Lease) (*types.SteeringMessage, error)
 	AcknowledgeSteering(ctx context.Context, lease *types.Lease, messageID int64) (bool, error)
 	InterruptRuntime(ctx context.Context, message string) (int, error)
+	ResolveMailbox(ctx context.Context, conversationID string, allowRoot bool) (types.MailboxIdentity, error)
+	ListContacts(ctx context.Context, identity types.MailboxIdentity) ([]types.Contact, error)
+	SendMail(ctx context.Context, identity types.MailboxIdentity, recipientID, subject, body string) (types.Mail, error)
+	ListMails(ctx context.Context, identity types.MailboxIdentity, status string, limit, offset int) (types.MailPage, error)
+	ReadMails(ctx context.Context, identity types.MailboxIdentity, ids []int64) ([]types.Mail, error)
 }
 
 var _ Store = (*db.Store)(nil)

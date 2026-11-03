@@ -28,10 +28,15 @@ func mustLoadToolSchemas() map[string]toolSchema {
 		Inputs           map[string]map[string]any `json:"inputs"`
 		AgentOutput      map[string]any            `json:"agentOutput"`
 		SteerAgentOutput map[string]any            `json:"steerAgentOutput"`
+		ContactOutput    map[string]any            `json:"contactOutput"`
+		MailOutput       map[string]any            `json:"mailOutput"`
 	}
 	if err := json.Unmarshal(schemaDocument, &document); err != nil {
 		panic(fmt.Sprintf("subagent: invalid schemas.json: %v", err))
 	}
+	readMail := cloneSchema(document.MailOutput)
+	readMail["properties"].(map[string]any)["body"] = map[string]any{"type": "string"}
+	readMail["required"] = append(readMail["required"].([]any), "body")
 	outputs := map[string]map[string]any{
 		"spawn_agent":    document.AgentOutput,
 		"wait_agent":     document.AgentOutput,
@@ -45,6 +50,34 @@ func mustLoadToolSchemas() map[string]toolSchema {
 			"required": []any{"agents"},
 			"title":    "ListAgentsOutput",
 			"type":     "object",
+		},
+		"list_contacts": {
+			"type": "object", "additionalProperties": false,
+			"properties": map[string]any{
+				"self_contact_id": map[string]any{"type": "string"},
+				"contacts":        map[string]any{"type": "array", "items": document.ContactOutput},
+			},
+			"required": []any{"self_contact_id", "contacts"},
+		},
+		"message_contact": {
+			"type": "object", "additionalProperties": false,
+			"properties": map[string]any{"mail": document.MailOutput},
+			"required":   []any{"mail"},
+		},
+		"list_mails": {
+			"type": "object", "additionalProperties": false,
+			"properties": map[string]any{
+				"mails":        map[string]any{"type": "array", "items": document.MailOutput},
+				"total":        map[string]any{"type": "integer", "minimum": 0},
+				"unread_count": map[string]any{"type": "integer", "minimum": 0},
+				"has_more":     map[string]any{"type": "boolean"},
+			},
+			"required": []any{"mails", "total", "unread_count", "has_more"},
+		},
+		"read_mails": {
+			"type": "object", "additionalProperties": false,
+			"properties": map[string]any{"mails": map[string]any{"type": "array", "items": readMail}},
+			"required":   []any{"mails"},
 		},
 	}
 	schemas := make(map[string]toolSchema, len(outputs))

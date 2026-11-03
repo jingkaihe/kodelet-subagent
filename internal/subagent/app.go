@@ -60,7 +60,7 @@ type Application struct {
 }
 
 // NewApplication registers the extension against runtime, or a new default
-// runtime when nil. Processes hosted by a child agent register no tools.
+// runtime when nil. Child agents may use mailboxes but not lifecycle controls.
 func NewApplication(runtime *Runtime) *Application {
 	if runtime == nil {
 		runtime = NewRuntime(RuntimeOptions{})
@@ -74,6 +74,10 @@ func NewApplication(runtime *Runtime) *Application {
 	if os.Getenv(RecursionGuardEnv) != "1" {
 		app.registerTools()
 	}
+	if runtime.mailboxEnabled {
+		app.registerMailboxTools()
+		app.registerMailboxEvents()
+	}
 	return app
 }
 
@@ -84,15 +88,22 @@ func (a *Application) Extension() *extension.Extension { return a.extension }
 func (a *Application) Runtime() *Runtime { return a.runtime }
 
 func (a *Application) registerEvents() {
-	extension.On(a.extension, extension.EventAgentInit, func(_ context.Context, _ extension.AgentInitEvent, ec *extension.EventContext) (extension.EventResult, error) {
-		return a.disableRecursiveAgents(newSDKEventCall(ec)), nil
+	extension.On(a.extension, extension.EventAgentInit, func(ctx context.Context, event extension.AgentInitEvent, ec *extension.EventContext) (extension.EventResult, error) {
+		call := newSDKEventCall(ec)
+		result := a.disableRecursiveAgents(call)
+		a.noteMailboxTools(event, call)
+		a.restoreMailboxWidget(ctx, call)
+		return result, nil
 	})
 	extension.On(a.extension, extension.EventSessionStart, func(ctx context.Context, _ extension.SessionStartEvent, ec *extension.EventContext) (extension.EventResult, error) {
 		a.restoreAgentWidget(ctx, newSDKEventCall(ec))
+		a.restoreMailboxWidget(ctx, newSDKEventCall(ec))
 		return extension.EventResult{}, nil
 	})
 	extension.On(a.extension, extension.EventAgentStart, func(ctx context.Context, _ extension.AgentStartEvent, ec *extension.EventContext) (extension.EventResult, error) {
+		a.resetMailboxNotices(newSDKEventCall(ec))
 		a.restoreAgentWidget(ctx, newSDKEventCall(ec))
+		a.restoreMailboxWidget(ctx, newSDKEventCall(ec))
 		return extension.EventResult{}, nil
 	})
 	extension.On(a.extension, extension.EventSessionEnd, func(ctx context.Context, _ extension.SessionEndEvent, _ *extension.EventContext) (extension.EventResult, error) {
@@ -130,7 +141,10 @@ func registerTool[In any](a *Application, name, description string, timeout time
 			if err != nil {
 				return extension.ToolResult{}, fmt.Errorf("invalid input for tool %s: %w", name, err)
 			}
-			return handle(ctx, decoded, newSDKToolCall(tc)), nil
+			call := newSDKToolCall(tc)
+			result := handle(ctx, decoded, call)
+			a.appendMailboxNotice(ctx, call, &result)
+			return result, nil
 		},
 	})
 }

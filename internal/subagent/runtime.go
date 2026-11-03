@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -22,6 +23,8 @@ const (
 	RecursionGuardEnv = "KODELET_SUBAGENT_EXTENSION_CHILD"
 	// ProfileEnv selects the model profile for fresh agents.
 	ProfileEnv = "KODELET_SUBAGENT_PROFILE"
+	// MailboxEnv opts this extension process into agent mailboxes.
+	MailboxEnv = "KODELET_AGENT_MAILBOX"
 )
 
 // AgentToolNames lists the tools disabled for child agents.
@@ -103,20 +106,22 @@ type RuntimeOptions struct {
 // liveRuns is only the current-generation lookup for an agent; ownedRuns
 // retains every generation by run ID until its cleanup completes.
 type Runtime struct {
-	runtimeID     string
-	clientFactory ClientFactory
-	newStore      func(path, runtimeID string) Store
-	timing        Timing
+	runtimeID      string
+	clientFactory  ClientFactory
+	newStore       func(path, runtimeID string) Store
+	timing         Timing
+	mailboxEnabled bool
 
-	mu           sync.Mutex
-	stores       map[string]Store
-	liveRuns     map[runKey]*LiveRun
-	ownedRuns    map[runKey]*LiveRun
-	setupTasks   map[*task]struct{}
-	cleanupTasks map[*task]struct{}
-	reservations map[chan struct{}]struct{}
-	widgetLocks  map[runKey]*sync.Mutex
-	shuttingDown bool
+	mu             sync.Mutex
+	stores         map[string]Store
+	liveRuns       map[runKey]*LiveRun
+	ownedRuns      map[runKey]*LiveRun
+	setupTasks     map[*task]struct{}
+	cleanupTasks   map[*task]struct{}
+	reservations   map[chan struct{}]struct{}
+	widgetLocks    map[runKey]*sync.Mutex
+	mailboxNotices map[runKey]mailboxNotice
+	shuttingDown   bool
 
 	shutdownMu sync.Mutex
 	shutdownOp *task
@@ -139,21 +144,26 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 		timing = *opts.Timing
 	}
 	newStore := opts.NewStore
+	mailboxEnabled := os.Getenv(MailboxEnv) == "enabled"
 	if newStore == nil {
-		newStore = newDefaultStore
+		newStore = func(path, runtimeID string) Store {
+			return newDefaultStore(path, runtimeID, mailboxEnabled)
+		}
 	}
 	return &Runtime{
-		runtimeID:     runtimeID,
-		clientFactory: clientFactory,
-		newStore:      newStore,
-		timing:        timing,
-		stores:        map[string]Store{},
-		liveRuns:      map[runKey]*LiveRun{},
-		ownedRuns:     map[runKey]*LiveRun{},
-		setupTasks:    map[*task]struct{}{},
-		cleanupTasks:  map[*task]struct{}{},
-		reservations:  map[chan struct{}]struct{}{},
-		widgetLocks:   map[runKey]*sync.Mutex{},
+		runtimeID:      runtimeID,
+		clientFactory:  clientFactory,
+		newStore:       newStore,
+		timing:         timing,
+		mailboxEnabled: mailboxEnabled,
+		stores:         map[string]Store{},
+		liveRuns:       map[runKey]*LiveRun{},
+		ownedRuns:      map[runKey]*LiveRun{},
+		setupTasks:     map[*task]struct{}{},
+		cleanupTasks:   map[*task]struct{}{},
+		reservations:   map[chan struct{}]struct{}{},
+		widgetLocks:    map[runKey]*sync.Mutex{},
+		mailboxNotices: map[runKey]mailboxNotice{},
 	}
 }
 
@@ -242,6 +252,9 @@ func (r *Runtime) syncAgentWidget(ctx context.Context, ui WidgetUI, store Store,
 
 func (r *Runtime) safeSyncAgentWidget(ctx context.Context, ui WidgetUI, store Store, ownerID string) {
 	_ = r.syncAgentWidget(ctx, ui, store, ownerID)
+	if r.mailboxEnabled {
+		_ = r.syncMailboxWidget(ctx, ui, store, types.MailboxIdentity{OwnerConversationID: ownerID, ContactID: "main"})
+	}
 }
 
 func (r *Runtime) liveRunFromClaim(claim types.Claim, taskText string, store Store) *LiveRun {

@@ -1,5 +1,77 @@
 {
   "inputs": {
+    "list_contacts": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "message_contact": {
+      "type": "object",
+      "properties": {
+        "contact_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Recipient contact_id from list_contacts; main addresses the main agent."
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Short subject, limited to 256 UTF-8 bytes."
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16000,
+          "description": "Message body, limited to 16000 UTF-8 bytes."
+        }
+      },
+      "required": ["contact_id", "subject", "body"],
+      "additionalProperties": false
+    },
+    "list_mails": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["unread", "read", "all"],
+          "default": "unread"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50,
+          "default": 20
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647,
+          "default": 0,
+          "description": "Skip this many matching messages. Repeat at offset 0 when reading unread batches because reading changes the list."
+        }
+      },
+      "additionalProperties": false
+    },
+    "read_mails": {
+      "type": "object",
+      "properties": {
+        "ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "description": "IDs from list_mails. Retrieves full bodies and marks read atomically. Batches exceeding the output budget fail without changing read state."
+        }
+      },
+      "required": ["ids"],
+      "additionalProperties": false
+    },
     "spawn_agent": {
       "properties": {
         "name": {
@@ -135,6 +207,43 @@
       "title": "CancelAgentInput",
       "type": "object"
     }
+  },
+  "contactOutput": {
+    "type": "object",
+    "properties": {
+      "contact_id": {"type": "string"},
+      "name": {"type": "string"},
+      "kind": {"type": "string", "enum": ["main", "agent", "system"]},
+      "status": {"type": "string"},
+      "task": {"type": "string", "description": "A bounded preview of the contact's current task."}
+    },
+    "required": ["contact_id", "name", "kind", "status", "task"],
+    "additionalProperties": false
+  },
+  "mailOutput": {
+    "type": "object",
+    "properties": {
+      "id": {"type": "integer", "minimum": 1},
+      "from": {
+        "type": "object",
+        "properties": {
+          "contact_id": {"type": "string"},
+          "name": {"type": "string"},
+          "kind": {"type": "string", "enum": ["main", "agent", "system"]}
+        },
+        "required": ["contact_id", "name", "kind"],
+        "additionalProperties": false
+      },
+      "recipient_id": {"type": "string"},
+      "subject": {"type": "string"},
+      "kind": {"type": "string"},
+      "agent_id": {"type": "string"},
+      "run_id": {"type": "string"},
+      "created_at": {"type": "string"},
+      "read_at": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    },
+    "required": ["id", "from", "recipient_id", "subject", "kind", "created_at", "read_at"],
+    "additionalProperties": false
   },
   "agentOutput": {
     "description": "An agent and its current run, with results included by wait_agent.",
