@@ -104,7 +104,7 @@ func releaseImportedClaims(path string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := reconcileLeasesTx(tx, math.MaxFloat64, SystemClock(), importedClaimMessage); err != nil {
+	if _, err := reconcileLeasesTx(tx, math.MaxFloat64, SystemClock(), importedClaimMessage, false); err != nil {
 		_ = tx.Rollback()
 		return err
 	}

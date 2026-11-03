@@ -11,7 +11,7 @@ import (
 )
 
 // HeadRevision is the newest packaged schema revision.
-const HeadRevision = "0002_canceling_state"
+const HeadRevision = "0003_mailbox"
 
 // versionTableSQL matches the table Alembic created for pre-Go databases, so
 // alembic_version remains the sole schema-version authority.
@@ -32,6 +32,7 @@ type migration struct {
 var migrations = []migration{
 	{revision: "0001_initial", file: "migrations/0001_initial.sql"},
 	{revision: "0002_canceling_state", file: "migrations/0002_canceling_state.sql"},
+	{revision: "0003_mailbox", file: "migrations/0003_mailbox.sql"},
 }
 
 func runMigrations(path string) error {

@@ -44,9 +44,10 @@ func SystemClock() float64 {
 // started: a canceled context is reported before a transaction begins, but a
 // transaction that has begun always runs to completion.
 type Store struct {
-	path      string
-	runtimeID string
-	clock     Clock
+	path           string
+	runtimeID      string
+	clock          Clock
+	mailboxEnabled bool
 
 	importSource string
 	onImport     func(source, target string)

@@ -12,13 +12,13 @@ import (
 )
 
 func (s *Store) reconcileExpiredTx(tx *sqlx.Tx, now float64) (int, error) {
-	return reconcileLeasesTx(tx, now, now, "agent lease expired")
+	return reconcileLeasesTx(tx, now, now, "agent lease expired", s.mailboxEnabled)
 }
 
 // reconcileLeasesTx releases active claims whose leases expire by cutoff.
 // Canceling agents whose run was canceled become canceled; other claims are
 // interrupted with message.
-func reconcileLeasesTx(tx *sqlx.Tx, cutoff, now float64, message string) (int, error) {
+func reconcileLeasesTx(tx *sqlx.Tx, cutoff, now float64, message string, mailboxEnabled bool) (int, error) {
 	var rows []activeRow
 	if err := tx.Select(&rows, `
 		SELECT id, active_run_id, generation, status
@@ -30,7 +30,7 @@ func reconcileLeasesTx(tx *sqlx.Tx, cutoff, now float64, message string) (int, e
 	reconciled := 0
 	for _, row := range rows {
 		if row.Status == string(types.AgentCanceling) {
-			completed, err := completeCancelRowTx(tx, row.ID, row.ActiveRunID, row.Generation, now)
+			completed, err := completeCancelRowTx(tx, row.ID, row.ActiveRunID, row.Generation, now, mailboxEnabled)
 			if err != nil {
 				return 0, err
 			}
@@ -39,7 +39,7 @@ func reconcileLeasesTx(tx *sqlx.Tx, cutoff, now float64, message string) (int, e
 			}
 			continue
 		}
-		if err := interruptRowTx(tx, row.ID, row.ActiveRunID, row.Generation, message, now); err != nil {
+		if err := interruptRowTx(tx, row.ID, row.ActiveRunID, row.Generation, message, now, mailboxEnabled); err != nil {
 			return 0, err
 		}
 		reconciled++
@@ -47,23 +47,30 @@ func reconcileLeasesTx(tx *sqlx.Tx, cutoff, now float64, message string) (int, e
 	return reconciled, nil
 }
 
-func interruptRowTx(tx *sqlx.Tx, agentID, runID string, generation int, message string, now float64) error {
+func interruptRowTx(tx *sqlx.Tx, agentID, runID string, generation int, message string, now float64, mailboxEnabled bool) error {
 	if _, err := tx.Exec(`
 		UPDATE runs
 		SET status = 'interrupted', error = ?, completed_at = ?, updated_at = ?
 		WHERE id = ? AND status IN ('starting', 'running')`, message, now, now, runID); err != nil {
 		return err
 	}
-	_, err := tx.Exec(`
+	result, err := tx.Exec(`
 		UPDATE agents
 		SET status = 'interrupted', lease_runtime_id = NULL,
 		    lease_token = NULL, lease_expires_at = NULL, updated_at = ?
 		WHERE id = ? AND active_run_id = ? AND generation = ?
 		  AND status IN ('starting', 'running')`, now, agentID, runID, generation)
-	return err
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected == 0 {
+		return err
+	}
+	return publishTerminalMailTx(tx, agentID, runID, now, mailboxEnabled)
 }
 
-func completeCancelRowTx(tx *sqlx.Tx, agentID, runID string, generation int, now float64) (bool, error) {
+func completeCancelRowTx(tx *sqlx.Tx, agentID, runID string, generation int, now float64, mailboxEnabled bool) (bool, error) {
 	result, err := tx.Exec(`
 		UPDATE agents
 		SET status = 'canceled', lease_runtime_id = NULL,
@@ -79,7 +86,10 @@ func completeCancelRowTx(tx *sqlx.Tx, agentID, runID string, generation int, now
 		return false, err
 	}
 	affected, err := result.RowsAffected()
-	return affected == 1, err
+	if err != nil || affected != 1 {
+		return false, err
+	}
+	return true, publishTerminalMailTx(tx, agentID, runID, now, mailboxEnabled)
 }
 
 func (s *Store) attachChildConversationTx(tx *sqlx.Tx, agent agentRow, agentID, conversationID string, now float64) error {
@@ -185,6 +195,9 @@ func (s *Store) MarkRunning(ctx context.Context, lease *types.Lease, conversatio
 			return err
 		}
 		agent, err = fetchAgentTx(tx, lease.AgentID, "", "")
+		if err == nil && s.mailboxEnabled && runRow.StartedAt == nil {
+			err = publishJoinedMailTx(tx, agent, now)
+		}
 		return err
 	})
 	return agent, err
@@ -266,6 +279,9 @@ func (s *Store) Terminal(ctx context.Context, lease *types.Lease, status types.T
 			WHERE id = ?`, resolved, string(status), now, lease.AgentID); err != nil {
 			return err
 		}
+		if err := publishTerminalMailTx(tx, lease.AgentID, lease.RunID, now, s.mailboxEnabled); err != nil {
+			return err
+		}
 		agent, err = fetchAgentTx(tx, lease.AgentID, lease.RunID, "")
 		return err
 	})
@@ -340,7 +356,7 @@ func (s *Store) CompleteCancel(ctx context.Context, lease *types.Lease) (bool, e
 		if err := s.validateCancelingLeaseRows(agentRow, runRow, lease, now); err != nil {
 			return err
 		}
-		completed, err = completeCancelRowTx(tx, lease.AgentID, lease.RunID, lease.Generation, now)
+		completed, err = completeCancelRowTx(tx, lease.AgentID, lease.RunID, lease.Generation, now, s.mailboxEnabled)
 		return err
 	})
 	return completed, err
@@ -361,7 +377,7 @@ func (s *Store) InterruptRuntime(ctx context.Context, message string) (int, erro
 			return err
 		}
 		for _, row := range rows {
-			if err := interruptRowTx(tx, row.ID, row.ActiveRunID, row.Generation, message, now); err != nil {
+			if err := interruptRowTx(tx, row.ID, row.ActiveRunID, row.Generation, message, now, s.mailboxEnabled); err != nil {
 				return err
 			}
 		}
