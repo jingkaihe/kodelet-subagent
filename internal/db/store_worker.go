@@ -89,7 +89,10 @@ func completeCancelRowTx(tx *sqlx.Tx, agentID, runID string, generation int, now
 	if err != nil || affected != 1 {
 		return false, err
 	}
-	return true, publishTerminalMailTx(tx, agentID, runID, now, mailboxEnabled)
+	if err := publishTerminalMailTx(tx, agentID, runID, now, mailboxEnabled); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) attachChildConversationTx(tx *sqlx.Tx, agent agentRow, agentID, conversationID string, now float64) error {

@@ -184,7 +184,7 @@ func TestMailboxToolsRejectCrossInboxReadsAndOversizedBatches(t *testing.T) {
 		})
 		ids = append(ids, sent["mail"].(map[string]any)["id"])
 	}
-	for _, batch := range [][]any{{ids[0], foreignID}, ids} {
+	for _, batch := range [][]any{{ids[0], foreignID}, ids, ids[:2]} {
 		result, err := h.ExecuteTool(f.ctx, "read_mails", map[string]any{"ids": batch}, extensiontest.WithCall(main))
 		require.NoError(t, err)
 		require.NotEmpty(t, result.Error)
@@ -202,4 +202,72 @@ func TestMailboxToolsRejectCrossInboxReadsAndOversizedBatches(t *testing.T) {
 	}, extensiontest.WithCall(main))
 	require.NoError(t, err)
 	require.NotEmpty(t, result.Error, "the store must enforce byte limits beyond JSON Schema character limits")
+}
+
+func assertMailboxReplyFitsCodeMode(t *testing.T, result extension.ToolResult) {
+	t.Helper()
+	// Model the whole ToolReply, not just .data or .text. Pretty-printing and
+	// Go's HTML escaping are deliberately more conservative than the VM needs.
+	encoded, err := json.MarshalIndent(map[string]any{
+		"data": result.StructuredContent, "text": result.Content,
+		"attachments": []any{}, "truncated": false,
+	}, "", "  ")
+	require.NoError(t, err)
+	require.Less(t, len(encoded), 40_000, "a single whole read reply must fit code mode's default selected-output limit")
+}
+
+func TestMailboxReadRepliesFitCodeModeBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name, subject, body string
+		count               int
+	}{
+		{"plain maximum", strings.Repeat("s", db.MaxMailSubjectBytes), strings.Repeat("b", db.MaxMailBodyBytes), 1},
+		{"escaped subject and body", strings.Repeat("<", db.MaxMailSubjectBytes), strings.Repeat("\x00", 2_600), 1},
+		{"mixed escapes and unicode", "Escapes", strings.Repeat("\"\\\n\t<>&\x00\u2028界", 400), 1},
+		{"maximum batch count", strings.Repeat("s", db.MaxMailSubjectBytes), strings.Repeat("界", 300), db.MaxReadMails},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(MailboxEnv, "enabled")
+			f := newFixture(t)
+			h := f.harness(t)
+			caller := extension.CallInfo{ConversationID: "owner-1"}
+			var ids []any
+			for range tc.count {
+				_, sent := executeMailbox(t, f, h, caller, "message_contact", map[string]any{
+					"contact_id": "main", "subject": tc.subject, "body": tc.body,
+				})
+				ids = append(ids, sent["mail"].(map[string]any)["id"])
+			}
+			result, data := executeMailbox(t, f, h, caller, "read_mails", map[string]any{"ids": ids})
+			assertMailboxReplyFitsCodeMode(t, result)
+			require.Contains(t, result.Content, tc.body)
+			for _, row := range data["mails"].([]any) {
+				mail := row.(map[string]any)
+				require.Equal(t, tc.body, mail["body"])
+				require.NotNil(t, mail["read_at"])
+			}
+		})
+	}
+}
+
+func TestMailboxLifecycleReadReplyFitsCodeModeBudget(t *testing.T) {
+	t.Setenv(MailboxEnv, "enabled")
+	f := newFixture(t)
+	call := f.call("owner-1")
+	store, identity, err := f.app.mailboxForCall(f.ctx, call)
+	require.NoError(t, err)
+	claim, err := store.Create(f.ctx, "owner-1", strings.Repeat("w", 48), "Complete task", f.cwd, types.ContextFresh)
+	require.NoError(t, err)
+	_, err = store.MarkRunning(f.ctx, claim.Lease, "child-worker")
+	require.NoError(t, err)
+	fullResult := strings.Repeat("<>&\x00\u2028界", db.MaxMailBodyBytes)
+	_, err = store.Terminal(f.ctx, claim.Lease, types.TerminalIdle, types.TerminalUpdate{Result: &fullResult})
+	require.NoError(t, err)
+	page, err := store.ListMails(f.ctx, identity, "unread", 1, 0)
+	require.NoError(t, err)
+	require.Equal(t, "run_completed", page.Mails[0].Kind)
+	result, _ := executeMailbox(t, f, f.harness(t), call.Info(), "read_mails", map[string]any{"ids": []int64{page.Mails[0].ID}})
+	assertMailboxReplyFitsCodeMode(t, result)
+	require.Contains(t, result.Content, "Truncated; full text remains in the stored run.")
+	require.NotContains(t, result.Content, fullResult)
 }

@@ -51,7 +51,7 @@ func publishTerminalMailTx(tx *sqlx.Tx, agentID, runID string, now float64, enab
 		body += "\n\n" + label + ":\n" + *agent.Run.Result
 	}
 	return publishEventMailTx(tx, "terminal:"+runID, agent, "run_"+string(agent.Run.Status),
-		agent.Name+" "+string(agent.Run.Status), boundedMailText(body, MaxMailBodyBytes), summary, now)
+		agent.Name+" "+string(agent.Run.Status), body, summary, now)
 }
 
 // One event and its recipient snapshot commit together with the state change.
@@ -77,11 +77,13 @@ func publishEventMailTx(tx *sqlx.Tx, eventID string, agent types.Agent, kind, su
 		if recipient == "main" {
 			body = mainBody
 		}
-		_, err := insertMailTx(tx, agent.OwnerConversationID, &eventID, types.Mail{
+		mail := types.Mail{
 			Sender:      types.Contact{ID: "system", Name: "Subagent runtime", Kind: "system"},
 			RecipientID: recipient, Subject: subject, Body: body, Kind: kind,
 			AgentID: agent.ID, RunID: agent.Run.ID, CreatedAt: now,
-		})
+		}
+		mail.Body = boundedMailBody(mail)
+		_, err := insertMailTx(tx, agent.OwnerConversationID, &eventID, mail)
 		if err != nil {
 			return err
 		}
@@ -89,15 +91,39 @@ func publishEventMailTx(tx *sqlx.Tx, eventID string, agent types.Agent, kind, su
 	return nil
 }
 
+const mailTruncationSuffix = "\n[Truncated; full text remains in the stored run.]"
+
+// Bound lifecycle mail to the same single-message read budget as SendMail.
+// Only the notification is shortened; the original run result remains intact.
+func boundedMailBody(mail types.Mail) string {
+	body := boundedMailText(mail.Body, MaxMailBodyBytes)
+	mail.Body = body
+	if mailReadBytes(mail) <= MaxMailReadBytes {
+		return body
+	}
+	// Search byte limits, with boundedMailText rounding down to UTF-8 boundaries
+	// and reserving the truncation label. Lifecycle headers fit with room to spare.
+	low, high := len(mailTruncationSuffix), len(body)-1
+	for low < high {
+		mid := low + (high-low+1)/2
+		mail.Body = boundedMailText(body, mid)
+		if mailReadBytes(mail) <= MaxMailReadBytes {
+			low = mid
+		} else {
+			high = mid - 1
+		}
+	}
+	return boundedMailText(body, low)
+}
+
 func boundedMailText(text string, limit int) string {
 	text = strings.ToValidUTF8(text, "�")
 	if len(text) <= limit {
 		return text
 	}
-	const suffix = "\n[Truncated; full text remains in the stored run.]"
-	end := limit - len(suffix)
+	end := limit - len(mailTruncationSuffix)
 	for !utf8.RuneStart(text[end]) {
 		end--
 	}
-	return text[:end] + suffix
+	return text[:end] + mailTruncationSuffix
 }

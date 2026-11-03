@@ -168,6 +168,18 @@ func TestImportUpgradesSourcesAtTheInitialRevision(t *testing.T) {
 	agent, err := newTestStore(t, target, "go-runtime", nil).Get(ctx, "owner", "agt_historical", "")
 	require.NoError(t, err)
 	require.Equal(t, "historical result", *agent.Run.Result)
+	mailStore := NewStore(target, "mail-runtime", nil, MailboxEnabled(true))
+	t.Cleanup(func() { _ = mailStore.Close() })
+	identity := mailboxIdentity(t, mailStore, "owner", true)
+	page, err := mailStore.ListMails(ctx, identity, "all", 20, 0)
+	require.NoError(t, err)
+	require.Empty(t, page.Mails, "imported history does not become new mail")
+	mail, err := mailStore.SendMail(ctx, identity, "agt_historical", "resume notes", "new mail after import")
+	require.NoError(t, err)
+	child := mailboxIdentity(t, mailStore, "child-historical", false)
+	read, err := mailStore.ReadMails(ctx, child, []int64{mail.ID})
+	require.NoError(t, err)
+	require.Equal(t, "new mail after import", read[0].Body)
 }
 
 func TestImportSkipsExistingTargetsAndMissingOrEmptySources(t *testing.T) {

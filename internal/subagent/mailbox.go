@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	mailboxWidgetID    = "agent-mailbox"
-	mailboxWidgetLimit = 3
-	mailboxHookTimeout = 2 * time.Second
+	mailboxWidgetID      = "agent-mailbox"
+	mailboxWidgetLimit   = 3
+	mailboxHookTimeout   = 2 * time.Second
+	mailboxWidgetTimeout = 200 * time.Millisecond
 )
 
 // mailboxForCall derives membership from the host's conversation identity, never tool input.
@@ -60,10 +61,19 @@ func (r *Runtime) syncMailboxWidget(ctx context.Context, ui WidgetUI, store Stor
 	if !r.mailboxEnabled || ui == nil {
 		return nil
 	}
+	timeout := min(mailboxWidgetTimeout, r.timing.HostRequestTimeout)
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < 2*timeout {
+		// Keep response-delivery headroom when the database operation ran slowly.
+		return nil
+	}
 	lock := r.widgetLock(store, "mailbox:"+identity.OwnerConversationID+":"+identity.ContactID)
-	lock.Lock()
+	// Refreshes are best-effort, including after committed send/read operations.
+	// Never queue behind another refresh or spend the tool's deadline on the UI.
+	if !lock.TryLock() {
+		return nil
+	}
 	defer lock.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, r.timing.HostRequestTimeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	page, err := store.ListMails(ctx, identity, "unread", mailboxWidgetLimit, 0)
 	if err != nil {

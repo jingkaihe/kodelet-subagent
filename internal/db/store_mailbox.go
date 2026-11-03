@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,12 +14,14 @@ import (
 	"github.com/jingkaihe/kodelet-subagent/internal/types"
 )
 
-// Mailbox limits are byte-based so Unicode and serialized tool output stay bounded.
+// Subject/body limits are UTF-8 bytes. The read budget counts both JSON-escaped
+// copies (text and structured output), leaving headroom below code mode's 40 KB
+// default for the enclosing reply and notices.
 const (
 	MaxMailSubjectBytes = 256
 	MaxMailBodyBytes    = 16_000
 	MaxReadMails        = 10
-	MaxMailReadBytes    = 48_000
+	MaxMailReadBytes    = 36_000
 	MaxMailListLimit    = 50
 )
 
@@ -140,6 +143,9 @@ func (s *Store) SendMail(ctx context.Context, identity types.MailboxIdentity, re
 			Sender:      types.Contact{ID: sender.ID, Name: sender.Name, Kind: sender.Kind},
 			RecipientID: recipientID, Subject: subject, Body: body, Kind: "message", CreatedAt: now,
 		}
+		if mailReadBytes(mail) > MaxMailReadBytes {
+			return fmt.Errorf("mail exceeds the %d-byte escaped read budget; shorten the subject or body", MaxMailReadBytes)
+		}
 		mail.ID, err = insertMailTx(tx, identity.OwnerConversationID, nil, mail)
 		return err
 	})
@@ -147,6 +153,22 @@ func (s *Store) SendMail(ctx context.Context, identity types.MailboxIdentity, re
 		return types.Mail{}, err
 	}
 	return mail, nil
+}
+
+// mailReadBytes conservatively sizes a mail in a text + structured tool reply.
+// The fixed allowance covers keys, numeric IDs, formatted timestamps, headers
+// and indentation, including the ID/read timestamp assigned after insertion.
+// Count all strings twice, even those only present in the structured copy.
+func mailReadBytes(mail types.Mail) int {
+	total := 1_024
+	for _, text := range []string{
+		mail.Sender.ID, mail.Sender.Name, mail.Sender.Kind, mail.RecipientID,
+		mail.Subject, mail.Body, mail.Kind, mail.AgentID, mail.RunID,
+	} {
+		encoded, _ := json.Marshal(text) // Strings always marshal successfully.
+		total += 2 * len(encoded)
+	}
+	return total
 }
 
 func insertMailTx(tx *sqlx.Tx, ownerID string, eventID *string, mail types.Mail) (int64, error) {

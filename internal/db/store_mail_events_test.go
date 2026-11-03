@@ -98,9 +98,10 @@ func TestMailboxPublishesEveryTerminalPathOnce(t *testing.T) {
 			switch outcome {
 			case "completed", "failed", "interrupted", "startup-failed":
 				status := types.TerminalStatus(outcome)
-				if outcome == "completed" {
+				switch outcome {
+				case "completed":
 					status = types.TerminalIdle
-				} else if outcome == "startup-failed" {
+				case "startup-failed":
 					status, kind = types.TerminalFailed, "run_failed"
 				}
 				for range 2 {
@@ -221,19 +222,87 @@ func TestMailboxLifecyclePublicationIsAtomic(t *testing.T) {
 }
 
 func TestMailboxTerminalResultsAreBoundedUTF8(t *testing.T) {
-	store, _ := mailboxStore(t, true)
-	mailboxIdentity(t, store, "owner", true)
-	claim := mailAgent(t, store, "owner", "worker")
-	startMailAgent(t, store, claim)
-	result := strings.Repeat("界", MaxMailBodyBytes)
-	_, err := store.Terminal(t.Context(), claim.Lease, types.TerminalIdle, types.TerminalUpdate{Result: &result})
+	for _, tc := range []struct {
+		name, result string
+	}{
+		{"unicode", strings.Repeat("界", MaxMailBodyBytes)},
+		{"escaped", strings.Repeat("<>&\x00\u2028界", MaxMailBodyBytes)},
+		{"escaped below raw limit", strings.Repeat("<", 4_000)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, _ := mailboxStore(t, true)
+			main := mailboxIdentity(t, store, "owner", true)
+			claim := mailAgent(t, store, "owner", "worker")
+			startMailAgent(t, store, claim)
+			_, err := store.Terminal(t.Context(), claim.Lease, types.TerminalIdle, types.TerminalUpdate{Result: &tc.result})
+			require.NoError(t, err)
+			mails := eventMails(t, store, claim.Agent.ID, "run_completed")
+			require.Len(t, mails, 1)
+			require.LessOrEqual(t, len(mails[0].Body), MaxMailBodyBytes)
+			require.LessOrEqual(t, mailReadBytes(mails[0].mail()), MaxMailReadBytes)
+			require.True(t, utf8.ValidString(mails[0].Body))
+			require.Contains(t, mails[0].Body, "Truncated")
+			read, err := store.ReadMails(t.Context(), main, []int64{mails[0].ID})
+			require.NoError(t, err)
+			require.Equal(t, mails[0].Body, read[0].Body)
+			require.NotNil(t, read[0].ReadAt)
+			agent, err := store.Get(t.Context(), "owner", claim.Agent.ID, claim.Lease.RunID)
+			require.NoError(t, err)
+			require.Equal(t, tc.result, *agent.Run.Result)
+		})
+	}
+}
+
+func TestMailboxStoreFlagDoesNotReplayOldEvents(t *testing.T) {
+	disabled, clock := mailboxStore(t, false)
+	main := mailboxIdentity(t, disabled, "owner", true)
+	claim := mailAgent(t, disabled, "owner", "worker")
+	startMailAgent(t, disabled, claim)
+	update := types.TerminalUpdate{Result: new("old result")}
+	_, err := disabled.Terminal(t.Context(), claim.Lease, types.TerminalIdle, update)
 	require.NoError(t, err)
-	mails := eventMails(t, store, claim.Agent.ID, "run_completed")
-	require.Len(t, mails, 1)
-	require.LessOrEqual(t, len(mails[0].Body), MaxMailBodyBytes)
-	require.True(t, utf8.ValidString(mails[0].Body))
-	require.Contains(t, mails[0].Body, "Truncated")
-	agent, err := store.Get(t.Context(), "owner", claim.Agent.ID, claim.Lease.RunID)
+	active := mailAgent(t, disabled, "owner", "active-worker")
+	startMailAgent(t, disabled, active)
+	require.NoError(t, disabled.Close())
+	enabled := NewStore(disabled.Path(), disabled.RuntimeID(), clock.now, MailboxEnabled(true))
+	t.Cleanup(func() { _ = enabled.Close() })
+	mailboxIdentity(t, enabled, "owner", true)
+	_, err = enabled.Terminal(t.Context(), claim.Lease, types.TerminalIdle, update)
 	require.NoError(t, err)
-	require.Equal(t, result, *agent.Run.Result)
+	startMailAgent(t, enabled, active)
+	page, err := enabled.ListMails(t.Context(), main, "all", 20, 0)
+	require.NoError(t, err)
+	require.Empty(t, page.Mails, "neither old results nor already-running agents are replayed")
+	second, err := enabled.Claim(t.Context(), "owner", claim.Agent.ID, "new task")
+	require.NoError(t, err)
+	startMailAgent(t, enabled, second)
+	require.Empty(t, eventMails(t, enabled, claim.Agent.ID, "agent_joined"))
+	_, err = enabled.Terminal(t.Context(), second.Lease, types.TerminalIdle, types.TerminalUpdate{Result: new("new result")})
+	require.NoError(t, err)
+	page, err = enabled.ListMails(t.Context(), main, "all", 20, 0)
+	require.NoError(t, err)
+	require.Len(t, page.Mails, 1)
+	require.Equal(t, second.Lease.RunID, page.Mails[0].RunID)
+}
+
+func TestMailboxRoomOptInDoesNotReplayExpiredClaims(t *testing.T) {
+	store, clock := mailboxStore(t, true)
+	claim := mailAgent(t, store, "owner", "old-worker")
+	_, err := store.MarkRunning(t.Context(), claim.Lease, "old-child")
+	require.NoError(t, err)
+	clock.advance(LeaseDurationSeconds + 1)
+	main := mailboxIdentity(t, store, "owner", true)
+	page, err := store.ListMails(t.Context(), main, "all", 20, 0)
+	require.NoError(t, err)
+	require.Empty(t, page.Mails)
+	agent, err := store.Get(t.Context(), "owner", claim.Agent.ID, "")
+	require.NoError(t, err)
+	require.Equal(t, types.RunInterrupted, agent.Run.Status)
+	future := mailAgent(t, store, "owner", "new-worker")
+	startMailAgent(t, store, future)
+	page, err = store.ListMails(t.Context(), main, "all", 20, 0)
+	require.NoError(t, err)
+	require.Len(t, page.Mails, 1)
+	require.Equal(t, "agent_joined", page.Mails[0].Kind)
+	require.Equal(t, future.Agent.ID, page.Mails[0].AgentID)
 }

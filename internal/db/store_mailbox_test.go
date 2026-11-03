@@ -173,7 +173,7 @@ func TestMailboxLimitsAndAtomicReads(t *testing.T) {
 	}
 	var ids []int64
 	for range 4 {
-		mail, err := store.SendMail(t.Context(), main, "main", strings.Repeat("s", MaxMailSubjectBytes), strings.Repeat("b", MaxMailBodyBytes))
+		mail, err := store.SendMail(t.Context(), main, "main", strings.Repeat("s", MaxMailSubjectBytes), strings.Repeat("b", MaxMailBodyBytes/2))
 		require.NoError(t, err)
 		ids = append(ids, mail.ID)
 	}
@@ -216,4 +216,58 @@ func TestMailboxLimitsAndAtomicReads(t *testing.T) {
 	require.Equal(t, 2, page.UnreadCount)
 	require.Empty(t, page.Mails)
 	require.False(t, page.HasMore)
+}
+
+func TestMailboxSendEnsuresSingleMailFitsEscapedReadBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name, subject, body string
+		accepted            bool
+	}{
+		{"plain capacity", strings.Repeat("s", MaxMailSubjectBytes), strings.Repeat("b", MaxMailBodyBytes), true},
+		{"unicode capacity", strings.Repeat("界", MaxMailSubjectBytes/3), strings.Repeat("界", MaxMailBodyBytes/3), true},
+		{"mixed escapes", strings.Repeat("<", MaxMailSubjectBytes), strings.Repeat("\"\\\n\x00\u2028界", 500), true},
+		{"escaped body", "subject", strings.Repeat("<>&\x00", 1_000), false},
+		{"escaped subject", strings.Repeat("<", MaxMailSubjectBytes), strings.Repeat("b", MaxMailBodyBytes), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, _ := mailboxStore(t, false)
+			main := mailboxIdentity(t, store, "owner", true)
+			mail, err := store.SendMail(t.Context(), main, "main", tc.subject, tc.body)
+			if !tc.accepted {
+				require.ErrorContains(t, err, "escaped read budget")
+				page, err := store.ListMails(t.Context(), main, "all", 20, 0)
+				require.NoError(t, err)
+				require.Empty(t, page.Mails, "a rejected send must not create unreadable mail")
+				return
+			}
+			require.NoError(t, err)
+			read, err := store.ReadMails(t.Context(), main, []int64{mail.ID})
+			require.NoError(t, err)
+			require.Equal(t, tc.subject, read[0].Subject)
+			require.Equal(t, tc.body, read[0].Body)
+			require.NotNil(t, read[0].ReadAt)
+			require.LessOrEqual(t, mailReadBytes(read[0]), MaxMailReadBytes)
+		})
+	}
+}
+
+func TestMailboxRejectsEscapedBatchBeforeMarkingRead(t *testing.T) {
+	store, _ := mailboxStore(t, false)
+	main := mailboxIdentity(t, store, "owner", true)
+	var ids []int64
+	for range 2 {
+		mail, err := store.SendMail(t.Context(), main, "main", "Escaped", strings.Repeat("<", 1_500))
+		require.NoError(t, err)
+		ids = append(ids, mail.ID)
+	}
+	_, err := store.ReadMails(t.Context(), main, ids)
+	require.ErrorContains(t, err, "escaped read budget; read fewer IDs")
+	page, err := store.ListMails(t.Context(), main, "unread", 20, 0)
+	require.NoError(t, err)
+	require.Equal(t, 2, page.UnreadCount)
+	for _, id := range ids {
+		read, err := store.ReadMails(t.Context(), main, []int64{id})
+		require.NoError(t, err)
+		require.NotNil(t, read[0].ReadAt)
+	}
 }

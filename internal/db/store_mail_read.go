@@ -83,7 +83,7 @@ func (s *Store) ListMails(ctx context.Context, identity types.MailboxIdentity, s
 
 // ReadMails atomically retrieves the selected messages and marks them read.
 // Reads are replayable and keep their first read timestamp. The combined
-// subject/body byte budget is checked before any read-state changes.
+// escaped text + structured output budget is checked before any read-state changes.
 func (s *Store) ReadMails(ctx context.Context, identity types.MailboxIdentity, ids []int64) ([]types.Mail, error) {
 	if len(ids) == 0 || len(ids) > MaxReadMails {
 		return nil, fmt.Errorf("read between 1 and %d mail IDs at a time", MaxReadMails)
@@ -111,9 +111,9 @@ func (s *Store) ReadMails(ctx context.Context, identity types.MailboxIdentity, i
 			if err != nil {
 				return err
 			}
-			totalBytes += len(row.Subject) + len(row.Body)
+			totalBytes += mailReadBytes(row.mail())
 			if totalBytes > MaxMailReadBytes {
-				return fmt.Errorf("selected mail exceeds %d bytes; read fewer IDs", MaxMailReadBytes)
+				return fmt.Errorf("selected mail exceeds the %d-byte escaped read budget; read fewer IDs", MaxMailReadBytes)
 			}
 			mails = append(mails, row.mail())
 		}

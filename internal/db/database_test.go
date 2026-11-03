@@ -51,13 +51,14 @@ func TestFreshDatabaseUpgradesToHeadWithRequiredPragmas(t *testing.T) {
 
 	db := rawDB(t, path)
 	tables := names(t, db, "table")
-	for _, table := range []string{"agents", "runs", "steering_messages", "alembic_version"} {
+	for _, table := range []string{"agents", "runs", "steering_messages", "alembic_version", "mailbox_rooms", "mailbox_events", "mails"} {
 		require.True(t, tables[table], table)
 	}
 	indexes := names(t, db, "index")
 	for _, index := range []string{
 		"idx_agents_owner_updated", "idx_agents_owner_name", "idx_agents_status_lease",
 		"idx_agents_runtime_status", "idx_runs_agent_created", "idx_steering_run",
+		"idx_mails_inbox", "idx_mails_unread",
 	} {
 		require.True(t, indexes[index], index)
 	}
@@ -233,6 +234,29 @@ func TestExistingEmptyDatabaseIsInitialized(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, nil, 0o644))
 	require.NoError(t, Migrate(path))
 	require.Equal(t, HeadRevision, readRevision(t, path))
+}
+
+func TestMailboxUpgradeAndRepeatedMigrationsPreserveMail(t *testing.T) {
+	for _, revision := range []string{initialRevision, "0002_canceling_state"} {
+		t.Run(revision, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), Filename)
+			migrateTo(t, path, revision)
+			require.NoError(t, Migrate(path))
+			store := newTestStore(t, path, "mail-runtime", nil)
+			main := mailboxIdentity(t, store, "owner", true)
+			mail, err := store.SendMail(t.Context(), main, "main", "keep this", "persisted body")
+			require.NoError(t, err)
+			read, err := store.ReadMails(t.Context(), main, []int64{mail.ID})
+			require.NoError(t, err)
+			require.NoError(t, store.Close())
+			require.NoError(t, Migrate(path))
+			require.NoError(t, Migrate(path))
+			replayed, err := store.ReadMails(t.Context(), main, []int64{mail.ID})
+			require.NoError(t, err)
+			require.Equal(t, read, replayed)
+			require.Equal(t, HeadRevision, readRevision(t, path))
+		})
+	}
 }
 
 func TestConcurrentFreshMigrationsShareTheDatabaseLock(t *testing.T) {
