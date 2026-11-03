@@ -141,10 +141,7 @@ func registerTool[In any](a *Application, name, description string, timeout time
 			if err != nil {
 				return extension.ToolResult{}, fmt.Errorf("invalid input for tool %s: %w", name, err)
 			}
-			call := newSDKToolCall(tc)
-			result := handle(ctx, decoded, call)
-			a.appendMailboxNotice(ctx, call, &result)
-			return result, nil
+			return handle(ctx, decoded, newSDKToolCall(tc)), nil
 		},
 	})
 }

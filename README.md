@@ -45,6 +45,21 @@ Existing agents are imported on first use. Any that were running come back as in
 
 Fresh agents use the parent conversation's model profile. To use a different profile, set `KODELET_SUBAGENT_PROFILE` (for example, `generic`) in the environment of the runner that hosts the extension, then restart that runner. Forked agents and follow-ups keep the conversation's saved settings.
 
+## Agent mailboxes (opt-in)
+
+Set `KODELET_AGENT_MAILBOX=enabled` on the runner hosting main and worker conversations, then restart it. Participants share the extension's data directory; each has its own inbox scoped to the main conversation. Workers can message main and one another without gaining lifecycle controls.
+
+| Tool | Purpose |
+| --- | --- |
+| `list_contacts()` | Discover main and worker contacts. |
+| `message_contact({contact_id, subject, body})` | Send attributed mail without waking or interrupting its recipient. |
+| `list_mails({status?, limit?, offset?})` | List headers only; defaults to unread, newest first. |
+| `read_mails({ids})` | Read bodies and atomically mark them read; safe to re-read. |
+
+New workers and finished runs notify the other participants automatically. Main receives bounded results; peers receive summaries. An inbox widget shows unread mail, and new arrivals trigger one hidden, deduplicated reminder at `turn.end` without changing the system prompt. Unchanged unread mail is not repeatedly announced. Requires a Kodelet host supporting structured turn-end follow-ups.
+
+Read batches are size-limited and fail atomically; retry fewer IDs if needed. When draining unread mail, keep offset zero because reading removes entries from that filtered list. Mail never wakes idle agents; use `followup_agent` to start more work.
+
 ## Commands
 
 ```bash

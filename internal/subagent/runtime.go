@@ -112,16 +112,16 @@ type Runtime struct {
 	timing         Timing
 	mailboxEnabled bool
 
-	mu             sync.Mutex
-	stores         map[string]Store
-	liveRuns       map[runKey]*LiveRun
-	ownedRuns      map[runKey]*LiveRun
-	setupTasks     map[*task]struct{}
-	cleanupTasks   map[*task]struct{}
-	reservations   map[chan struct{}]struct{}
-	widgetLocks    map[runKey]*sync.Mutex
-	mailboxNotices map[runKey]mailboxNotice
-	shuttingDown   bool
+	mu              sync.Mutex
+	stores          map[string]Store
+	liveRuns        map[runKey]*LiveRun
+	ownedRuns       map[runKey]*LiveRun
+	setupTasks      map[*task]struct{}
+	cleanupTasks    map[*task]struct{}
+	reservations    map[chan struct{}]struct{}
+	widgetLocks     map[runKey]*sync.Mutex
+	mailboxReadable map[runKey]bool
+	shuttingDown    bool
 
 	shutdownMu sync.Mutex
 	shutdownOp *task
@@ -151,19 +151,19 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 		}
 	}
 	return &Runtime{
-		runtimeID:      runtimeID,
-		clientFactory:  clientFactory,
-		newStore:       newStore,
-		timing:         timing,
-		mailboxEnabled: mailboxEnabled,
-		stores:         map[string]Store{},
-		liveRuns:       map[runKey]*LiveRun{},
-		ownedRuns:      map[runKey]*LiveRun{},
-		setupTasks:     map[*task]struct{}{},
-		cleanupTasks:   map[*task]struct{}{},
-		reservations:   map[chan struct{}]struct{}{},
-		widgetLocks:    map[runKey]*sync.Mutex{},
-		mailboxNotices: map[runKey]mailboxNotice{},
+		runtimeID:       runtimeID,
+		clientFactory:   clientFactory,
+		newStore:        newStore,
+		timing:          timing,
+		mailboxEnabled:  mailboxEnabled,
+		stores:          map[string]Store{},
+		liveRuns:        map[runKey]*LiveRun{},
+		ownedRuns:       map[runKey]*LiveRun{},
+		setupTasks:      map[*task]struct{}{},
+		cleanupTasks:    map[*task]struct{}{},
+		reservations:    map[chan struct{}]struct{}{},
+		widgetLocks:     map[runKey]*sync.Mutex{},
+		mailboxReadable: map[runKey]bool{},
 	}
 }
 

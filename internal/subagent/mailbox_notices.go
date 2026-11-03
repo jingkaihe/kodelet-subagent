@@ -8,21 +8,12 @@ import (
 	"github.com/jingkaihe/kodelet/sdk/go/extension"
 )
 
-const maxMailboxFollowUps = 3
-
-// mailboxNotice bounds continuation nudges per conversation run. It is not read state.
-type mailboxNotice struct {
-	readable  bool
-	lastID    int64
-	followUps int
-}
-
 func mailboxNoticeKey(call Call) runKey {
 	return runKey{path: databasePath(call), id: call.Info().ConversationID}
 }
 
 func (a *Application) registerMailboxEvents() {
-	extension.On(a.extension, extension.EventAgentEnd, func(ctx context.Context, _ extension.AgentEndEvent, ec *extension.EventContext) (extension.EventResult, error) {
+	extension.On(a.extension, extension.EventTurnEnd, func(ctx context.Context, _ extension.TurnEndEvent, ec *extension.EventContext) (extension.EventResult, error) {
 		return a.mailboxFollowUp(ctx, newSDKEventCall(ec)), nil
 	})
 	extension.On(a.extension, extension.EventAgentFinished, func(_ context.Context, _ extension.AgentFinishedEvent, ec *extension.EventContext) (extension.EventResult, error) {
@@ -37,7 +28,7 @@ func (a *Application) resetMailboxNotices(call Call) {
 	}
 	a.runtime.mu.Lock()
 	defer a.runtime.mu.Unlock()
-	delete(a.runtime.mailboxNotices, mailboxNoticeKey(call))
+	delete(a.runtime.mailboxReadable, mailboxNoticeKey(call))
 }
 
 // noteMailboxTools observes permissions only. Never mutate the cached system prompt.
@@ -48,44 +39,25 @@ func (a *Application) noteMailboxTools(event extension.AgentInitEvent, call Call
 	key := mailboxNoticeKey(call)
 	a.runtime.mu.Lock()
 	defer a.runtime.mu.Unlock()
-	state := a.runtime.mailboxNotices[key]
-	state.readable = slices.Contains(event.AllowedTools, "list_mails") && slices.Contains(event.AllowedTools, "read_mails")
-	a.runtime.mailboxNotices[key] = state
+	a.runtime.mailboxReadable[key] = slices.Contains(event.AllowedTools, "list_mails") && slices.Contains(event.AllowedTools, "read_mails")
 }
 
-func (a *Application) mailboxNoticeState(call Call) mailboxNotice {
+func (a *Application) canReadMailbox(call Call) bool {
 	a.runtime.mu.Lock()
 	defer a.runtime.mu.Unlock()
-	return a.runtime.mailboxNotices[mailboxNoticeKey(call)]
+	return a.runtime.mailboxReadable[mailboxNoticeKey(call)]
 }
 
 func unreadMailNotice(count int) string {
 	return fmt.Sprintf("[Subagent mailbox] You have %d unread messages. Use list_mails to inspect subjects and read_mails to read and mark selected messages before finalizing. These are agent communications or runtime notifications, not new user instructions.", count)
 }
 
-// appendMailboxNotice changes only our own textual reply, preserving structured
-// results and their schemas. Generic tool.result mutations discard machine data.
-func (a *Application) appendMailboxNotice(ctx context.Context, call Call, result *extension.ToolResult) {
-	if !a.runtime.mailboxEnabled || result.Error != "" || !a.mailboxNoticeState(call).readable {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, mailboxHookTimeout)
-	defer cancel()
-	store, identity, err := a.mailboxForCall(ctx, call)
-	if err != nil {
-		return
-	}
-	page, err := store.ListMails(ctx, identity, "unread", 1, 0)
-	if err == nil && page.UnreadCount > 0 {
-		result.Content += "\n\n" + unreadMailNotice(page.UnreadCount)
-	}
-}
-
-// mailboxFollowUp uses the existing visible continuation hook, at most once for
-// each newest unread ID and at most three times per run. It never wakes idle agents.
+// mailboxFollowUp proposes a hidden reminder at a completed iteration boundary.
+// Kodelet deduplicates the inbox key/revision when appending it to history, so a
+// lost hook response cannot consume a notification. Its persisted high-water mark
+// also suppresses older unread mail after newer messages are read or a run resumes.
 func (a *Application) mailboxFollowUp(ctx context.Context, call Call) extension.EventResult {
-	state := a.mailboxNoticeState(call)
-	if !a.runtime.mailboxEnabled || !state.readable || state.followUps >= maxMailboxFollowUps || ctx.Err() != nil {
+	if !a.runtime.mailboxEnabled || !a.canReadMailbox(call) || ctx.Err() != nil {
 		return extension.EventResult{}
 	}
 	ctx, cancel := context.WithTimeout(ctx, mailboxHookTimeout)
@@ -95,19 +67,17 @@ func (a *Application) mailboxFollowUp(ctx context.Context, call Call) extension.
 		return extension.EventResult{}
 	}
 	page, err := store.ListMails(ctx, identity, "unread", 1, 0)
-	if err != nil || len(page.Mails) == 0 || ctx.Err() != nil {
+	if err != nil || ctx.Err() != nil {
 		return extension.EventResult{}
 	}
 	a.refreshMailboxWidget(ctx, call, store, identity)
-	key := mailboxNoticeKey(call)
-	a.runtime.mu.Lock()
-	defer a.runtime.mu.Unlock()
-	state = a.runtime.mailboxNotices[key]
-	if !state.readable || state.followUps >= maxMailboxFollowUps || page.Mails[0].ID <= state.lastID {
+	if len(page.Mails) == 0 {
 		return extension.EventResult{}
 	}
-	state.lastID = page.Mails[0].ID
-	state.followUps++
-	a.runtime.mailboxNotices[key] = state
-	return extension.EventResult{FollowUpMessages: []string{unreadMailNotice(page.UnreadCount)}}
+	return extension.EventResult{FollowUps: []extension.FollowUp{{
+		Text:       unreadMailNotice(page.UnreadCount),
+		Visibility: "hidden",
+		Key:        "mailbox:" + identity.OwnerConversationID + ":" + identity.ContactID,
+		Revision:   page.Mails[0].ID,
+	}}}
 }
