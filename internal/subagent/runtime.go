@@ -23,7 +23,7 @@ const (
 	RecursionGuardEnv = "KODELET_SUBAGENT_EXTENSION_CHILD"
 	// ProfileEnv selects the model profile for fresh agents.
 	ProfileEnv = "KODELET_SUBAGENT_PROFILE"
-	// MailboxEnv opts this extension process into agent mailboxes.
+	// MailboxEnv opts into agent mailboxes when no mailbox config is supplied.
 	MailboxEnv = "KODELET_AGENT_MAILBOX"
 )
 
@@ -145,19 +145,12 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 	if opts.Timing != nil {
 		timing = *opts.Timing
 	}
-	newStore := opts.NewStore
-	mailboxEnabled := os.Getenv(MailboxEnv) == "enabled"
-	if newStore == nil {
-		newStore = func(path, runtimeID string) Store {
-			return newDefaultStore(path, runtimeID, mailboxEnabled)
-		}
-	}
 	return &Runtime{
 		runtimeID:         runtimeID,
 		clientFactory:     clientFactory,
-		newStore:          newStore,
+		newStore:          opts.NewStore,
 		timing:            timing,
-		mailboxEnabled:    mailboxEnabled,
+		mailboxEnabled:    os.Getenv(MailboxEnv) == "enabled",
 		stores:            map[string]Store{},
 		liveRuns:          map[runKey]*LiveRun{},
 		ownedRuns:         map[runKey]*LiveRun{},
@@ -173,13 +166,6 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 
 // RuntimeID returns the ID recorded on this runtime's leases.
 func (r *Runtime) RuntimeID() string { return r.runtimeID }
-
-// ResetForInitialize lets a newly initialized extension session accept work.
-func (r *Runtime) ResetForInitialize() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.shuttingDown = false
-}
 
 func (r *Runtime) ensureAccepting() error {
 	r.mu.Lock()
@@ -209,7 +195,11 @@ func (r *Runtime) store(call Call) Store {
 	r.mu.Lock()
 	store := r.stores[path]
 	if store == nil {
-		store = r.newStore(path, r.runtimeID)
+		if r.newStore != nil {
+			store = r.newStore(path, r.runtimeID)
+		} else {
+			store = newDefaultStore(path, r.runtimeID, r.mailboxEnabled)
+		}
 		r.stores[path] = store
 	}
 	r.mu.Unlock()

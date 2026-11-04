@@ -13,6 +13,87 @@ import (
 	"github.com/jingkaihe/kodelet-subagent/internal/types"
 )
 
+func TestMailboxConfigurationAtInitialize(t *testing.T) {
+	for _, tc := range []struct {
+		name, env string
+		config    map[string]any
+		enabled   bool
+	}{
+		{"default disabled", "", nil, false},
+		{"environment fallback", "enabled", nil, true},
+		{"config enables", "", map[string]any{"mailbox": "enabled"}, true},
+		{"config disables", "enabled", map[string]any{"mailbox": "disabled"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(MailboxEnv, tc.env)
+			f := newFixture(t)
+			peer := newConnectionPeer(f.app)
+			defer peer.conn.Close(nil)
+			response := peer.initializeConfig(t, 1, map[string]any{}, tc.config)
+			require.NotContains(t, response, "error")
+			manifest := response["result"].(map[string]any)
+			if tc.enabled {
+				require.ElementsMatch(t, []string{"list_agent_contacts", "send_agent_message", "list_agent_messages", "read_agent_messages"}, toolNames(manifest))
+				require.Contains(t, events(manifest), "turn.end")
+			} else {
+				require.Empty(t, toolNames(manifest))
+				require.NotContains(t, events(manifest), "turn.end")
+			}
+			// Repeated handshakes must not duplicate registrations or alter state.
+			require.Equal(t, manifest, peer.initializeConfig(t, 2, map[string]any{}, tc.config)["result"])
+			require.Equal(t, tc.enabled, f.runtime.mailboxEnabled)
+			store := f.store(f.call("owner-1"))
+			identity, err := store.ResolveMailbox(f.ctx, "owner-1", true)
+			require.NoError(t, err)
+			mailboxWorker(t, f, store, "worker")
+			page, err := store.ListMails(f.ctx, identity, "unread", 20, 0)
+			require.NoError(t, err)
+			if tc.enabled {
+				require.Equal(t, 2, page.UnreadCount, "the store must use the configured mailbox setting too")
+			} else {
+				require.Zero(t, page.UnreadCount)
+			}
+		})
+	}
+}
+
+func TestMailboxInitializeRejectsInvalidOrChangedConfiguration(t *testing.T) {
+	t.Setenv(MailboxEnv, "")
+	f := newFixture(t)
+	peer := newConnectionPeer(f.app)
+	defer peer.conn.Close(nil)
+	for _, id := range []any{nil, true, []any{}, map[string]any{}} {
+		request, err := json.Marshal(map[string]any{
+			"jsonrpc": "2.0", "id": id, "method": "extension.initialize",
+			"params": map[string]any{"extension": map[string]any{"config": map[string]any{"mailbox": "enabled"}}},
+		})
+		require.NoError(t, err)
+		require.NoError(t, peer.conn.Receive(request))
+		require.False(t, f.app.initialized, "invalid request IDs must not freeze configuration")
+		require.Nil(t, peer.conn.runtime)
+	}
+	for i, config := range []any{
+		"enabled",
+		map[string]any{"mailboxes": "enabled"},
+		map[string]any{"mailbox": true},
+		map[string]any{"mailbox": nil},
+		map[string]any{"mailbox": "typo"},
+		map[string]any{"mailbox": map[string]any{}},
+	} {
+		response := peer.initializeConfig(t, i+1, nil, config)
+		require.Contains(t, response, "error")
+		require.NotContains(t, response, "result")
+		require.False(t, f.app.initialized)
+		require.Nil(t, peer.conn.runtime, "invalid config must not start the SDK runtime")
+	}
+	config := map[string]any{"mailbox": "enabled"}
+	require.Contains(t, peer.initializeConfig(t, 10, nil, config), "result")
+	changed := peer.initializeConfig(t, 11, nil, map[string]any{"mailbox": "disabled"})
+	require.Contains(t, changed["error"].(map[string]any)["message"], "fresh process")
+	require.True(t, f.runtime.mailboxEnabled)
+	require.Contains(t, peer.initializeConfig(t, 12, nil, config), "result")
+}
+
 func TestMailboxToolInputSchemas(t *testing.T) {
 	defaults := ListMailsInput{Status: "unread", Limit: 20}
 	listed, err := decodeInput("list_agent_messages", json.RawMessage(`{}`), defaults)

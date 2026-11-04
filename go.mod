@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/google/jsonschema-go v0.4.3
-	github.com/jingkaihe/kodelet/sdk/go v0.0.0-20261104092026-7926aa6e7f9e
+	github.com/jingkaihe/kodelet/sdk/go v0.0.0-20261104232458-ac08cca896a9
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/stretchr/testify v1.12.1
 	modernc.org/sqlite v1.61.1

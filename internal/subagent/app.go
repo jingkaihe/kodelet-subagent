@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jingkaihe/kodelet/sdk/go/extension"
@@ -57,6 +58,10 @@ type Application struct {
 	runtime   *Runtime
 	extension *extension.Extension
 	waitPoll  time.Duration
+
+	initializeMu   sync.Mutex
+	initialized    bool
+	mailboxDefault bool
 }
 
 // NewApplication registers the extension against runtime, or a new default
@@ -66,19 +71,57 @@ func NewApplication(runtime *Runtime) *Application {
 		runtime = NewRuntime(RuntimeOptions{})
 	}
 	app := &Application{
-		runtime:   runtime,
-		extension: extension.New(extension.Metadata{Name: "subagent", Version: version.Version}),
-		waitPoll:  waitPollInterval,
+		runtime:        runtime,
+		waitPoll:       waitPollInterval,
+		mailboxDefault: runtime.mailboxEnabled,
 	}
-	app.registerEvents()
-	if os.Getenv(RecursionGuardEnv) != "1" {
-		app.registerTools()
-	}
-	if runtime.mailboxEnabled {
-		app.registerMailboxTools()
-		app.registerMailboxEvents()
-	}
+	app.registerExtension()
 	return app
+}
+
+func (a *Application) registerExtension() {
+	a.extension = extension.New(extension.Metadata{Name: "subagent", Version: version.Version})
+	a.registerEvents()
+	if os.Getenv(RecursionGuardEnv) != "1" {
+		a.registerTools()
+	}
+	if a.runtime.mailboxEnabled {
+		a.registerMailboxTools()
+		a.registerMailboxEvents()
+	}
+}
+
+// initialize applies process configuration before the SDK snapshots registrations.
+// A different configuration requires a fresh process, as provided by host reload.
+func (a *Application) initialize(config map[string]any) error {
+	a.initializeMu.Lock()
+	defer a.initializeMu.Unlock()
+	enabled := a.mailboxDefault
+	for key, value := range config {
+		if key != "mailbox" {
+			return fmt.Errorf("unknown subagent setting %q", key)
+		}
+		switch value {
+		case "enabled":
+			enabled = true
+		case "disabled":
+			enabled = false
+		default:
+			return errors.New("subagent mailbox must be enabled or disabled")
+		}
+	}
+	a.runtime.mu.Lock()
+	defer a.runtime.mu.Unlock()
+	if enabled != a.runtime.mailboxEnabled {
+		if a.initialized || len(a.runtime.stores) != 0 {
+			return errors.New("subagent configuration changed; reload the extension in a fresh process")
+		}
+		a.runtime.mailboxEnabled = enabled
+		a.registerExtension()
+	}
+	a.initialized = true
+	a.runtime.shuttingDown = false
+	return nil
 }
 
 // Extension returns the registered extension.

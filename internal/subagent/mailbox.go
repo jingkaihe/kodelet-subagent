@@ -26,7 +26,7 @@ func (a *Application) mailboxForCall(ctx context.Context, call Call) (Store, typ
 
 func (a *Application) resolveMailboxForCall(ctx context.Context, call Call, create bool) (Store, types.MailboxIdentity, error) {
 	if !a.runtime.mailboxEnabled {
-		return nil, types.MailboxIdentity{}, errors.New("agent mailbox is disabled; set KODELET_AGENT_MAILBOX=enabled on the runner")
+		return nil, types.MailboxIdentity{}, errors.New(mailboxDisabledMessage)
 	}
 	conversationID, err := ownerConversationID(call)
 	if err != nil {

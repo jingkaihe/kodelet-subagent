@@ -250,9 +250,22 @@ func newConnectionPeer(app *Application) *connectionPeer {
 
 func (p *connectionPeer) initialize(t *testing.T, id int, capabilities map[string]any) map[string]any {
 	t.Helper()
+	response := p.initializeConfig(t, id, capabilities, nil)
+	require.NotContains(t, response, "error")
+	result, ok := response["result"].(map[string]any)
+	require.True(t, ok)
+	return result
+}
+
+func (p *connectionPeer) initializeConfig(t *testing.T, id int, capabilities map[string]any, config any) map[string]any {
+	t.Helper()
 	request, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": id, "method": "extension.initialize",
-		"params": map[string]any{"protocolVersion": extension.ProtocolVersion, "extension": map[string]any{"id": "subagent"}, "capabilities": capabilities},
+		"params": map[string]any{
+			"protocolVersion": extension.ProtocolVersion,
+			"extension":       map[string]any{"id": "subagent", "config": config},
+			"capabilities":    capabilities,
+		},
 	})
 	require.NoError(t, err)
 	require.NoError(t, p.conn.Receive(request))
@@ -262,7 +275,7 @@ func (p *connectionPeer) initialize(t *testing.T, id int, capabilities map[strin
 		defer p.mu.Unlock()
 		for _, message := range p.sent {
 			if message["id"] == float64(id) {
-				result, _ = message["result"].(map[string]any)
+				result = message
 				return true
 			}
 		}

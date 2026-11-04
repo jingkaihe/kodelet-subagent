@@ -47,7 +47,16 @@ Fresh agents use the parent conversation's model profile. To use a different pro
 
 ## Agent mailboxes (opt-in)
 
-Requires Kodelet 0.8.21-beta or later. Set `KODELET_AGENT_MAILBOX=enabled` on the runner hosting main and worker conversations, then restart it. Participants share the extension's data directory; each has its own inbox scoped to the main conversation. Workers can message main and one another without gaining lifecycle controls.
+Requires Kodelet 0.8.21-beta or later. On hosts supporting `extensions.config`, configure the runner's `config.yaml` or workspace `kodelet-config.yaml`:
+
+```yaml
+extensions:
+  config:
+    subagent:
+      mailbox: enabled
+```
+
+`mailbox: enabled | disabled` overrides the `KODELET_AGENT_MAILBOX=enabled` environment fallback. Reload after workspace changes; restart the runner after global changes. Each participant has an inbox scoped to the main conversation; workers can message main and one another without lifecycle controls.
 
 | Tool | Purpose |
 | --- | --- |

@@ -11,7 +11,7 @@ import (
 	"github.com/jingkaihe/kodelet-subagent/internal/types"
 )
 
-const mailboxDisabledMessage = "mailbox tools require KODELET_AGENT_MAILBOX=enabled"
+const mailboxDisabledMessage = "agent mailbox is disabled; set extensions.config.subagent.mailbox to enabled (or KODELET_AGENT_MAILBOX=enabled when no mailbox setting is configured)"
 
 type ListContactsInput struct{}
 
