@@ -160,6 +160,7 @@ func TestMailboxMessagingReadStateAndReplay(t *testing.T) {
 func TestMailboxLimitsAndAtomicReads(t *testing.T) {
 	store, _ := mailboxStore(t, false)
 	main := mailboxIdentity(t, store, "owner", true)
+	sender := startMailAgent(t, store, mailAgent(t, store, "owner", "sender"))
 	for _, pair := range [][2]string{
 		{" 	", "body"},
 		{"subject", ""},
@@ -168,12 +169,12 @@ func TestMailboxLimitsAndAtomicReads(t *testing.T) {
 		{"invalid\xff", "body"},
 		{"subject", "invalid\xff"},
 	} {
-		_, err := store.SendMail(t.Context(), main, "main", pair[0], pair[1])
+		_, err := store.SendMail(t.Context(), sender, "main", pair[0], pair[1])
 		require.Error(t, err)
 	}
 	var ids []int64
 	for range 4 {
-		mail, err := store.SendMail(t.Context(), main, "main", strings.Repeat("s", MaxMailSubjectBytes), strings.Repeat("b", MaxMailBodyBytes/2))
+		mail, err := store.SendMail(t.Context(), sender, "main", strings.Repeat("s", MaxMailSubjectBytes), strings.Repeat("b", MaxMailBodyBytes/2))
 		require.NoError(t, err)
 		ids = append(ids, mail.ID)
 	}
@@ -232,7 +233,8 @@ func TestMailboxSendEnsuresSingleMailFitsEscapedReadBudget(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store, _ := mailboxStore(t, false)
 			main := mailboxIdentity(t, store, "owner", true)
-			mail, err := store.SendMail(t.Context(), main, "main", tc.subject, tc.body)
+			sender := startMailAgent(t, store, mailAgent(t, store, "owner", "sender"))
+			mail, err := store.SendMail(t.Context(), sender, "main", tc.subject, tc.body)
 			if !tc.accepted {
 				require.ErrorContains(t, err, "escaped read budget")
 				page, err := store.ListMails(t.Context(), main, "all", 20, 0)
@@ -254,9 +256,10 @@ func TestMailboxSendEnsuresSingleMailFitsEscapedReadBudget(t *testing.T) {
 func TestMailboxRejectsEscapedBatchBeforeMarkingRead(t *testing.T) {
 	store, _ := mailboxStore(t, false)
 	main := mailboxIdentity(t, store, "owner", true)
+	sender := startMailAgent(t, store, mailAgent(t, store, "owner", "sender"))
 	var ids []int64
 	for range 2 {
-		mail, err := store.SendMail(t.Context(), main, "main", "Escaped", strings.Repeat("<", 1_500))
+		mail, err := store.SendMail(t.Context(), sender, "main", "Escaped", strings.Repeat("<", 1_500))
 		require.NoError(t, err)
 		ids = append(ids, mail.ID)
 	}
@@ -269,5 +272,18 @@ func TestMailboxRejectsEscapedBatchBeforeMarkingRead(t *testing.T) {
 		read, err := store.ReadMails(t.Context(), main, []int64{id})
 		require.NoError(t, err)
 		require.NotNil(t, read[0].ReadAt)
+	}
+}
+
+func TestMailboxRejectsSelfMail(t *testing.T) {
+	store, _ := mailboxStore(t, false)
+	main := mailboxIdentity(t, store, "owner", true)
+	worker := startMailAgent(t, store, mailAgent(t, store, "owner", "worker"))
+	for _, sender := range []types.MailboxIdentity{main, worker} {
+		_, err := store.SendMail(t.Context(), sender, " "+sender.ContactID+" ", "Self", "Do not notify me")
+		require.ErrorContains(t, err, "cannot send mail to yourself")
+		page, err := store.ListMails(t.Context(), sender, "all", 20, 0)
+		require.NoError(t, err)
+		require.Empty(t, page.Mails)
 	}
 }

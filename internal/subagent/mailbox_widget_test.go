@@ -18,7 +18,8 @@ func TestMailboxWidgetCannotHoldUpCommittedToolReplies(t *testing.T) {
 				call := f.call("owner-1")
 				store, identity, err := f.app.mailboxForCall(f.ctx, call)
 				require.NoError(t, err)
-				mail, err := store.SendMail(f.ctx, identity, "main", "Read this", "Delivered body")
+				sender, senderInfo := mailboxSender(t, f, store, "owner-1")
+				mail, err := store.SendMail(f.ctx, sender, "main", "Read this", "Delivered body")
 				require.NoError(t, err)
 				if blocker != "held lock" {
 					call.ui.block, call.ui.blockStarted = newEvent(), newEvent()
@@ -43,7 +44,9 @@ func TestMailboxWidgetCannotHoldUpCommittedToolReplies(t *testing.T) {
 				started := time.Now()
 				var result extension.ToolResult
 				if operation == "send" {
-					result = f.app.MessageContact(ctx, MessageContactInput{ContactID: "main", Subject: "Sent", Body: "Stored body"}, call)
+					sendCall := f.call(senderInfo.ConversationID, invokedBy("subagent"))
+					sendCall.ui = call.ui
+					result = f.app.MessageContact(ctx, MessageContactInput{ContactID: "main", Subject: "Sent", Body: "Stored body"}, sendCall)
 				} else {
 					result = f.app.ReadMails(ctx, ReadMailsInput{IDs: []int64{mail.ID}}, call)
 				}

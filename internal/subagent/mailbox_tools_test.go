@@ -107,6 +107,18 @@ func mailboxWorker(t *testing.T, f *fixture, store Store, name string) types.Age
 	return agent
 }
 
+// Register a sender without starting a run, so mail tests do not create lifecycle notices.
+func mailboxSender(t *testing.T, f *fixture, store Store, owner string) (types.MailboxIdentity, extension.CallInfo) {
+	t.Helper()
+	claim, err := store.Create(f.ctx, owner, "mail-sender", "Send test mail", f.cwd, types.ContextFresh)
+	require.NoError(t, err)
+	conversation := "sender-" + owner
+	_, err = store.AttachConversation(f.ctx, claim.Lease, conversation)
+	require.NoError(t, err)
+	return types.MailboxIdentity{OwnerConversationID: owner, ContactID: claim.Agent.ID},
+		extension.CallInfo{ConversationID: conversation, InvokedBy: "subagent"}
+}
+
 func TestMailboxToolsWorkerMessagingAndReadState(t *testing.T) {
 	t.Setenv("KODELET_AGENT_MAILBOX", "enabled")
 	f := newFixture(t)
@@ -174,12 +186,14 @@ func TestMailboxToolsRejectCrossInboxReadsAndOversizedBatches(t *testing.T) {
 	f := newFixture(t)
 	h := f.harness(t)
 	main := extension.CallInfo{ConversationID: "owner-1"}
-	other := extension.CallInfo{ConversationID: "owner-2"}
+	store := f.store(f.call("owner-1"))
+	_, sender := mailboxSender(t, f, store, "owner-1")
+	_, other := mailboxSender(t, f, store, "owner-2")
 	_, foreign := executeMailbox(t, f, h, other, "message_contact", map[string]any{"contact_id": "main", "subject": "Private", "body": "other inbox"})
 	foreignID := foreign["mail"].(map[string]any)["id"]
 	ids := make([]any, 0, 4)
 	for range 4 {
-		_, sent := executeMailbox(t, f, h, main, "message_contact", map[string]any{
+		_, sent := executeMailbox(t, f, h, sender, "message_contact", map[string]any{
 			"contact_id": "main", "subject": "Large message", "body": strings.Repeat("x", db.MaxMailBodyBytes),
 		})
 		ids = append(ids, sent["mail"].(map[string]any)["id"])
@@ -199,7 +213,7 @@ func TestMailboxToolsRejectCrossInboxReadsAndOversizedBatches(t *testing.T) {
 	require.Equal(t, ids[2], page["mails"].([]any)[0].(map[string]any)["id"])
 	result, err := h.ExecuteTool(f.ctx, "message_contact", map[string]any{
 		"contact_id": "main", "subject": strings.Repeat("界", 100), "body": "UTF-8 byte limit",
-	}, extensiontest.WithCall(main))
+	}, extensiontest.WithCall(sender))
 	require.NoError(t, err)
 	require.NotEmpty(t, result.Error, "the store must enforce byte limits beyond JSON Schema character limits")
 }
@@ -231,9 +245,10 @@ func TestMailboxReadRepliesFitCodeModeBudget(t *testing.T) {
 			f := newFixture(t)
 			h := f.harness(t)
 			caller := extension.CallInfo{ConversationID: "owner-1"}
+			_, sender := mailboxSender(t, f, f.store(f.call("owner-1")), "owner-1")
 			var ids []any
 			for range tc.count {
-				_, sent := executeMailbox(t, f, h, caller, "message_contact", map[string]any{
+				_, sent := executeMailbox(t, f, h, sender, "message_contact", map[string]any{
 					"contact_id": "main", "subject": tc.subject, "body": tc.body,
 				})
 				ids = append(ids, sent["mail"].(map[string]any)["id"])

@@ -86,7 +86,7 @@ func (a *Application) registerMailboxTools() {
 	registerTool(a, "list_contacts", `List main and worker contacts in this conversation's team, including yourself.
 Use contact_id when sending mail. Contacts may be idle; mail does not wake them.`, listToolTimeout,
 		func() ListContactsInput { return ListContactsInput{} }, a.ListContacts)
-	registerTool(a, "message_contact", `Send a subject and body to a contact in your team. Your identity is derived by
+	registerTool(a, "message_contact", `Send a subject and body to another contact in your team. Your identity is derived by
 the host; you cannot choose the sender. Success means stored, not read. Mail does
 not interrupt or wake the recipient; use lifecycle tools for starting work.`, listToolTimeout,
 		func() MessageContactInput { return MessageContactInput{} }, a.MessageContact)

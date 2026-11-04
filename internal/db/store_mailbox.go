@@ -145,6 +145,9 @@ func (s *Store) SendMail(ctx context.Context, identity types.MailboxIdentity, re
 		if err != nil {
 			return err
 		}
+		if recipientID == sender.ID {
+			return errors.New("cannot send mail to yourself; choose another contact")
+		}
 		if _, err := mailboxContactTx(tx, identity.OwnerConversationID, recipientID); err != nil {
 			return err
 		}
