@@ -244,17 +244,99 @@ func TestMailboxUpgradeAndRepeatedMigrationsPreserveMail(t *testing.T) {
 			require.NoError(t, Migrate(path))
 			store := newTestStore(t, path, "mail-runtime", nil)
 			main := mailboxIdentity(t, store, "owner", true)
-			mail, err := store.SendMail(t.Context(), main, "main", "keep this", "persisted body")
+			child := startMailAgent(t, store, mailAgent(t, store, "owner", "reader"))
+			mail, err := store.SendMail(t.Context(), main, child.ContactID, "keep this", "persisted body")
 			require.NoError(t, err)
-			read, err := store.ReadMails(t.Context(), main, []int64{mail.ID})
+			read, err := store.ReadMails(t.Context(), child, []int64{mail.ID})
 			require.NoError(t, err)
 			require.NoError(t, store.Close())
 			require.NoError(t, Migrate(path))
 			require.NoError(t, Migrate(path))
-			replayed, err := store.ReadMails(t.Context(), main, []int64{mail.ID})
+			replayed, err := store.ReadMails(t.Context(), child, []int64{mail.ID})
 			require.NoError(t, err)
 			require.Equal(t, read, replayed)
 			require.Equal(t, HeadRevision, readRevision(t, path))
+		})
+	}
+}
+
+func TestMailboxIDsRemainMonotonicAfterMigrationAndDeletion(t *testing.T) {
+	for _, revision := range []string{HeadRevision, "0003_mailbox"} {
+		t.Run(revision, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), Filename)
+			if revision == HeadRevision {
+				require.NoError(t, Migrate(path))
+			} else {
+				migrateTo(t, path, revision)
+			}
+			db := rawDB(t, path)
+			db.MustExec("PRAGMA foreign_keys = ON")
+			db.MustExec("INSERT INTO mailbox_rooms VALUES ('owner', 1000.0)")
+			db.MustExec("INSERT INTO mailbox_events VALUES ('terminal:run-1', 'owner', 1001.0)")
+			db.MustExec(`
+				INSERT INTO mails (id, owner_conversation_id, event_id, sender_id, sender_name, sender_kind,
+					recipient_id, subject, body, kind, agent_id, run_id, created_at, read_at)
+				VALUES (7, 'owner', 'terminal:run-1', 'system', 'Subagent runtime', 'system',
+					'main', 'Worker completed', 'Résumé preserved', 'run_completed', 'agent-1', 'run-1', 1001.0, 1002.0),
+					(42, 'owner', NULL, 'agent-1', 'worker', 'agent', 'main', 'Question',
+					'Unread body', 'message', '', '', 1003.0, NULL)`)
+			type storedMail struct {
+				mailRow
+				OwnerConversationID string  `db:"owner_conversation_id"`
+				EventID             *string `db:"event_id"`
+			}
+			var before, after []storedMail
+			require.NoError(t, db.Select(&before, "SELECT * FROM mails ORDER BY id"))
+			require.NoError(t, db.Close())
+			require.NoError(t, Migrate(path))
+			require.NoError(t, Migrate(path))
+			require.Equal(t, HeadRevision, readRevision(t, path))
+
+			db = rawDB(t, path)
+			db.MustExec("PRAGMA foreign_keys = ON")
+			require.NoError(t, db.Select(&after, "SELECT * FROM mails ORDER BY id"))
+			require.Equal(t, before, after, "all IDs, mail contents and read state must survive")
+			require.Len(t, after, 2)
+			require.Equal(t, 1002.0, *after[0].ReadAt)
+			require.Nil(t, after[1].ReadAt)
+			for name, want := range map[string]string{
+				"idx_mails_inbox":  "CREATE INDEX idx_mails_inbox ON mails (owner_conversation_id, recipient_id, id DESC)",
+				"idx_mails_unread": "CREATE INDEX idx_mails_unread ON mails (owner_conversation_id, recipient_id, id DESC) WHERE read_at IS NULL",
+			} {
+				var ddl string
+				require.NoError(t, db.Get(&ddl, "SELECT sql FROM sqlite_master WHERE name = ?", name))
+				require.Equal(t, want, ddl)
+			}
+			for _, change := range []string{
+				"owner_conversation_id = 'missing'",
+				"event_id = 'missing'",
+				"event_id = 'terminal:run-1'",
+				"sender_kind = 'invalid'",
+			} {
+				_, err := db.Exec("UPDATE mails SET " + change + " WHERE id = 42")
+				require.Error(t, err, "foreign keys, event deduplication and sender constraints remain enforced")
+				require.True(t, isConstraintViolation(err))
+			}
+			violations, err := hasForeignKeyViolations(db)
+			require.NoError(t, err)
+			require.False(t, violations)
+
+			lastID := int64(42)
+			for _, deletion := range []string{"DELETE FROM mails WHERE id = 42", "DELETE FROM mails"} {
+				db.MustExec(deletion)
+				require.NoError(t, db.Close())
+				require.NoError(t, Migrate(path), "rerunning migration must not reset the high-water mark")
+				db = rawDB(t, path)
+				result, err := db.Exec(`
+					INSERT INTO mails (owner_conversation_id, sender_id, sender_name, sender_kind,
+						recipient_id, subject, body, kind, created_at)
+					VALUES ('owner', 'agent-1', 'worker', 'agent', 'main', 'New mail', 'Body', 'message', 1004.0)`)
+				require.NoError(t, err)
+				id, err := result.LastInsertId()
+				require.NoError(t, err)
+				require.Greater(t, id, lastID, "deleted mail IDs must never be reused")
+				lastID = id
+			}
 		})
 	}
 }
