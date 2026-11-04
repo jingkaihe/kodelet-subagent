@@ -174,7 +174,7 @@ func TestMailboxNoticesPreserveSystemPromptAndStructuredResults(t *testing.T) {
 	_, err = store.ReadMails(f.ctx, identity, []int64{mail.ID})
 	require.NoError(t, err)
 	f.app.restoreMailboxWidget(f.ctx, call)
-	require.Contains(t, call.ui.text(mailboxWidgetID), "0 unread")
+	require.Empty(t, call.ui.text(mailboxWidgetID))
 	end = f.app.mailboxFollowUp(f.ctx, call)
 	require.Empty(t, end.FollowUps)
 }
@@ -259,4 +259,56 @@ func TestMailboxLifecycleRefreshesMainWidget(t *testing.T) {
 	require.Contains(t, call.ui.text(mailboxWidgetID), "1 unread")
 	require.Contains(t, call.ui.text(mailboxWidgetID), "researcher")
 	require.Contains(t, call.ui.text(WidgetID), "completed")
+}
+
+func TestMailboxPassiveHooksDoNotEnrollInactiveConversation(t *testing.T) {
+	t.Setenv(MailboxEnv, "enabled")
+	f := newFixture(t)
+	call := f.call("owner-1")
+	h := f.harness(t)
+	for _, event := range []string{"session.start", "agent.start", "agent.init", "turn.end"} {
+		result, err := h.HandleEvent(f.ctx, event, map[string]any{
+			"allowedTools": []string{"list_mails", "read_mails"},
+		}, owner("owner-1"))
+		require.NoError(t, err)
+		require.Empty(t, result.FollowUps)
+	}
+	f.app.restoreMailboxWidget(f.ctx, call)
+	require.Empty(t, call.ui.text(mailboxWidgetID))
+	require.Empty(t, f.runtime.mailboxWidgets)
+	require.Empty(t, f.runtime.mailboxIdentities)
+	database, err := db.Open(databasePath(call))
+	require.NoError(t, err)
+	defer database.Close()
+	var rooms int
+	require.NoError(t, database.Get(&rooms, "SELECT COUNT(*) FROM mailbox_rooms"))
+	require.Zero(t, rooms, "passive hooks must not enroll conversations")
+
+	// Explicit mailbox use can still opt in, but an empty inbox stays hidden.
+	store, identity, err := f.app.mailboxForCall(f.ctx, call)
+	require.NoError(t, err)
+	f.app.refreshMailboxWidget(f.ctx, call, store, identity)
+	require.Empty(t, call.ui.text(mailboxWidgetID))
+	require.NoError(t, database.Get(&rooms, "SELECT COUNT(*) FROM mailbox_rooms"))
+	require.Equal(t, 1, rooms)
+}
+
+func TestMailboxReadingLastMailRemovesWidget(t *testing.T) {
+	t.Setenv(MailboxEnv, "enabled")
+	f := newFixture(t)
+	call := f.call("owner-1")
+	store, identity, err := f.app.mailboxForCall(f.ctx, call)
+	require.NoError(t, err)
+	claim, err := store.Create(f.ctx, identity.OwnerConversationID, "researcher", "task", f.cwd, types.ContextFresh)
+	require.NoError(t, err)
+	mail, err := store.SendMail(f.ctx, types.MailboxIdentity{OwnerConversationID: identity.OwnerConversationID, ContactID: claim.Agent.ID}, "main", "Notice", "body")
+	require.NoError(t, err)
+	f.app.noteMailboxTools(extension.AgentInitEvent{AllowedTools: []string{"list_mails", "read_mails"}}, call)
+	require.Len(t, f.app.mailboxFollowUp(f.ctx, call).FollowUps, 1)
+	require.Contains(t, call.ui.text(mailboxWidgetID), "1 unread")
+	result := f.app.ReadMails(f.ctx, ReadMailsInput{IDs: []int64{mail.ID}}, call)
+	require.Empty(t, result.Error)
+	require.Empty(t, call.ui.text(mailboxWidgetID))
+	require.Empty(t, f.app.mailboxFollowUp(f.ctx, call).FollowUps)
+	require.Empty(t, call.ui.text(mailboxWidgetID))
 }

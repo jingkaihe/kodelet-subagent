@@ -120,7 +120,11 @@ func (r *Runtime) syncMailboxWidget(ctx context.Context, ui WidgetUI, store Stor
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	err = ui.SetWidget(ctx, mailboxWidgetID, mailboxWidgetLines(page), extension.WidgetAboveComposer)
+	if page.UnreadCount == 0 {
+		err = ui.RemoveWidget(ctx, mailboxWidgetID)
+	} else {
+		err = ui.SetWidget(ctx, mailboxWidgetID, mailboxWidgetLines(page), extension.WidgetAboveComposer)
+	}
 	if err == nil {
 		r.mu.Lock()
 		r.mailboxWidgets[key] = state
