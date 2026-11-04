@@ -282,6 +282,7 @@ func toolNames(manifest map[string]any) []string {
 }
 
 func TestCapabilityGateAndMainOnlyRecursionGuards(t *testing.T) {
+	t.Setenv(MailboxEnv, "")
 	f := newFixture(t)
 	peer := newConnectionPeer(f.app)
 	defer peer.conn.Close(nil)
@@ -396,6 +397,7 @@ func TestFreshRunsAndFollowupsDisableOnlySubagentControlsWithInlineHook(t *testi
 }
 
 func TestServeSpeaksFramedJSONRPCAndShutsDownOnEOF(t *testing.T) {
+	t.Setenv(MailboxEnv, "")
 	f := newFixture(t)
 	extensionReader, hostWriter := io.Pipe()
 	hostReader, extensionWriter := io.Pipe()
