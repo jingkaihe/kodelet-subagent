@@ -56,7 +56,7 @@ Requires Kodelet `7926aa6e` (0.8.20-beta development build) or later for hidden 
 | `list_mails({status?, limit?, offset?})` | List headers only; defaults to unread, newest first. |
 | `read_mails({ids})` | Read bodies and atomically mark them read; safe to re-read. |
 
-New workers and finished runs notify the other participants automatically. Main receives bounded results; peers receive summaries. An inbox widget shows unread mail, and new arrivals trigger one hidden, deduplicated reminder at `turn.end` without changing the system prompt. Unchanged unread mail is not repeatedly announced.
+New workers and finished runs notify the other participants automatically. Completion mail contains summaries only; `wait_agent` marks main's notice for the returned terminal run read. A widget shows nonempty inboxes, and new arrivals trigger one hidden, deduplicated reminder at `turn.end` without changing the system prompt. Unchanged unread mail is not repeatedly announced.
 
 Read batches are size-limited and fail atomically; retry fewer IDs if needed. When draining unread mail, keep offset zero because reading removes entries from that filtered list. Recipient widgets refresh on their next mailbox tool call or lifecycle hook, not immediately on send. Mail never wakes idle agents; use `followup_agent` to start more work.
 
