@@ -134,7 +134,7 @@ func TestMailboxLifecycleRefreshesMainWidget(t *testing.T) {
 	id := agentID(t, f.spawn(call, SpawnAgentInput{Name: "researcher", Task: "research", ContextMode: types.ContextFresh}))
 	require.Equal(t, "result for research", f.wait(call, id, 1000).Content)
 	waitUntil(t, func() bool { return f.ownedCount() == 0 })
-	require.Contains(t, call.ui.text(mailboxWidgetID), "2 unread")
+	require.Contains(t, call.ui.text(mailboxWidgetID), "1 unread")
 	require.Contains(t, call.ui.text(mailboxWidgetID), "researcher")
 	require.Contains(t, call.ui.text(WidgetID), "completed")
 }

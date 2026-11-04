@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -24,7 +25,7 @@ func publishJoinedMailTx(tx *sqlx.Tx, agent types.Agent, now float64) error {
 	}
 	body := fmt.Sprintf("Contact: %s\nName: %s\nTask: %s\nStatus: running\n\nUse message_contact to contact this agent.",
 		agent.ID, agent.Name, boundedMailText(agent.Run.Task, 1_000))
-	return publishEventMailTx(tx, "joined:"+agent.ID, agent, "agent_joined", agent.Name+" joined the team", body, body, now)
+	return publishEventMailTx(tx, "joined:"+agent.ID, agent, "agent_joined", agent.Name+" joined the team", body, now)
 }
 
 // publishTerminalMailTx runs inside the transaction that finalizes a run or
@@ -42,21 +43,26 @@ func publishTerminalMailTx(tx *sqlx.Tx, agentID, runID string, now float64, enab
 	if agent.Run.Error != nil {
 		summary += "\nError: " + boundedMailText(*agent.Run.Error, 1_000)
 	}
-	body := summary
-	if agent.Run.Result != nil {
-		label := "Result"
-		if agent.Run.Status != types.RunCompleted {
-			label = "Partial result (run did not complete)"
-		}
-		body += "\n\n" + label + ":\n" + *agent.Run.Result
-	}
 	return publishEventMailTx(tx, "terminal:"+runID, agent, "run_"+string(agent.Run.Status),
-		agent.Name+" "+string(agent.Run.Status), body, summary, now)
+		agent.Name+" "+string(agent.Run.Status), summary, now)
+}
+
+// AckTerminalMail marks only main's notification for the returned run as read.
+// Run IDs identify immutable generations; a later follow-up, peer inboxes,
+// joined notices and explicit messages are never acknowledged by this receipt.
+func (s *Store) AckTerminalMail(ctx context.Context, ownerID, agentID, runID string) error {
+	return s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {
+		_, err := tx.Exec(`UPDATE mails SET read_at = ?
+			WHERE owner_conversation_id = ? AND recipient_id = 'main'
+			  AND sender_kind = 'system' AND event_id = ? AND agent_id = ? AND run_id = ?
+			  AND read_at IS NULL`, now, ownerID, "terminal:"+runID, agentID, runID)
+		return err
+	})
 }
 
 // One event and its recipient snapshot commit together with the state change.
 // The event key prevents a retry from broadcasting to later team members.
-func publishEventMailTx(tx *sqlx.Tx, eventID string, agent types.Agent, kind, subject, mainBody, peerBody string, now float64) error {
+func publishEventMailTx(tx *sqlx.Tx, eventID string, agent types.Agent, kind, subject, body string, now float64) error {
 	result, err := tx.Exec(`INSERT INTO mailbox_events (id, owner_conversation_id, created_at)
 		SELECT ?, owner_conversation_id, ? FROM mailbox_rooms WHERE owner_conversation_id = ?
 		ON CONFLICT (id) DO NOTHING`, eventID, now, agent.OwnerConversationID)
@@ -73,10 +79,6 @@ func publishEventMailTx(tx *sqlx.Tx, eventID string, agent types.Agent, kind, su
 		return err
 	}
 	for _, recipient := range append([]string{"main"}, peers...) {
-		body := peerBody
-		if recipient == "main" {
-			body = mainBody
-		}
 		mail := types.Mail{
 			Sender:      types.Contact{ID: "system", Name: "Subagent runtime", Kind: "system"},
 			RecipientID: recipient, Subject: subject, Body: body, Kind: kind,

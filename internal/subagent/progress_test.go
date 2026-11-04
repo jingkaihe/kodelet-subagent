@@ -42,6 +42,7 @@ func firstTaskRun(t *testing.T, call *fakeCall) taskprogress.Snapshot {
 }
 
 func TestWaitKeepsTheRunCapturedWhenFollowupStarts(t *testing.T) {
+	t.Setenv(MailboxEnv, "enabled")
 	f := newFixture(t)
 	f.app.waitPoll = 200 * time.Millisecond
 	call := f.call("owner-1")
@@ -73,9 +74,67 @@ func TestWaitKeepsTheRunCapturedWhenFollowupStarts(t *testing.T) {
 	require.Len(t, taskRun.Activities, 1)
 	require.Equal(t, "first-call", taskRun.Activities[0].ID)
 	require.Equal(t, 1, taskRun.Counts.Failed)
+	identity := types.MailboxIdentity{OwnerConversationID: "owner-1", ContactID: "main"}
+	page, err := store.ListMails(f.ctx, identity, "read", 20, 0)
+	require.NoError(t, err)
+	require.Len(t, page.Mails, 1)
+	require.Equal(t, firstRunID, page.Mails[0].RunID)
+	require.Equal(t, "run_completed", page.Mails[0].Kind)
 
 	f.acp.release().set()
+	f.waitForStatus(store, "owner-1", id, types.RunCompleted)
+	page, err = store.ListMails(f.ctx, identity, "unread", 20, 0)
+	require.NoError(t, err)
+	require.Len(t, page.Mails, 2, "joined and the newer completion remain unread")
+	require.Equal(t, str(followup, "run_id"), page.Mails[0].RunID)
 	require.Equal(t, "result for second pass", f.wait(call, id, 1000).Content)
+}
+
+func TestWaitTimeoutLeavesLaterCompletionMailUnread(t *testing.T) {
+	t.Setenv(MailboxEnv, "enabled")
+	f := newFixture(t)
+	call := f.call("owner-1")
+	f.acp.update(func(a *fakeACP) { a.blockRuns = true })
+	id := agentID(t, f.spawn(call, SpawnAgentInput{Name: "late-mail", Task: "finish later", ContextMode: types.ContextFresh}))
+	f.acp.started().wait(t)
+	require.Equal(t, "running", str(f.wait(call, id, 10), "status"))
+	f.acp.release().set()
+	store := f.store(call)
+	f.waitForStatus(store, "owner-1", id, types.RunCompleted)
+	identity := types.MailboxIdentity{OwnerConversationID: "owner-1", ContactID: "main"}
+	page, err := store.ListMails(f.ctx, identity, "unread", 20, 0)
+	require.NoError(t, err)
+	require.Len(t, page.Mails, 2)
+	require.Equal(t, "run_completed", page.Mails[0].Kind)
+	require.Equal(t, "result for finish later", f.wait(call, id, 0).Content)
+	page, err = store.ListMails(f.ctx, identity, "unread", 20, 0)
+	require.NoError(t, err)
+	require.Len(t, page.Mails, 1)
+	require.Equal(t, "agent_joined", page.Mails[0].Kind)
+}
+
+func TestWaitAcknowledgesFailedAndInterruptedRunMail(t *testing.T) {
+	for _, status := range []types.TerminalStatus{types.TerminalFailed, types.TerminalInterrupted} {
+		t.Run(string(status), func(t *testing.T) {
+			t.Setenv(MailboxEnv, "enabled")
+			f := newFixture(t)
+			call := f.call("owner-1")
+			store, identity, err := f.app.mailboxForCall(f.ctx, call)
+			require.NoError(t, err)
+			claim, err := store.Create(f.ctx, "owner-1", "worker", "inspect", f.cwd, types.ContextFresh)
+			require.NoError(t, err)
+			_, err = store.Terminal(f.ctx, claim.Lease, status, types.TerminalUpdate{Error: new("worker stopped")})
+			require.NoError(t, err)
+			result := f.wait(call, claim.Agent.ID, 0)
+			require.Equal(t, string(status), str(result, "status"))
+			require.Equal(t, claim.Lease.RunID, str(result, "run_id"))
+			require.Contains(t, result.Content, "worker stopped")
+			page, err := store.ListMails(f.ctx, identity, "read", 20, 0)
+			require.NoError(t, err)
+			require.Len(t, page.Mails, 1, "returning a failed outcome still delivers its terminal status")
+			require.Equal(t, claim.Lease.RunID, page.Mails[0].RunID)
+		})
+	}
 }
 
 func TestWaitStreamsLiveSubagentTaskProgress(t *testing.T) {

@@ -268,6 +268,6 @@ func TestMailboxLifecycleReadReplyFitsCodeModeBudget(t *testing.T) {
 	require.Equal(t, "run_completed", page.Mails[0].Kind)
 	result, _ := executeMailbox(t, f, f.harness(t), call.Info(), "read_mails", map[string]any{"ids": []int64{page.Mails[0].ID}})
 	assertMailboxReplyFitsCodeMode(t, result)
-	require.Contains(t, result.Content, "Truncated; full text remains in the stored run.")
+	require.Contains(t, result.Content, "Outcome: completed")
 	require.NotContains(t, result.Content, fullResult)
 }

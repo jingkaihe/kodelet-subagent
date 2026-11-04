@@ -91,6 +91,7 @@ type Store interface {
 	SendMail(ctx context.Context, identity types.MailboxIdentity, recipientID, subject, body string) (types.Mail, error)
 	ListMails(ctx context.Context, identity types.MailboxIdentity, status string, limit, offset int) (types.MailPage, error)
 	ReadMails(ctx context.Context, identity types.MailboxIdentity, ids []int64) ([]types.Mail, error)
+	AckTerminalMail(ctx context.Context, ownerID, agentID, runID string) error
 }
 
 var _ Store = (*db.Store)(nil)

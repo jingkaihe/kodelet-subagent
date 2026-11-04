@@ -32,6 +32,15 @@ func (a *Application) WaitAgent(ctx context.Context, input WaitAgentInput, call 
 	if progress != nil {
 		snapshot["taskRun"] = finishWaitProgress(ctx, progress, agent)
 	}
+	// Cancellation publishes its notice only after cleanup. A wait that still
+	// reports canceling has not delivered the final outcome, so leave that notice
+	// for a later wait. A historical run is independent of the current generation.
+	canceling := agent.Status == types.AgentCanceling && agent.Run.Generation == agent.Generation
+	if a.runtime.mailboxEnabled && !agent.Run.Status.Active() && !canceling {
+		if err := store.AckTerminalMail(ctx, agent.OwnerConversationID, agent.ID, agent.Run.ID); err != nil {
+			call.Logger().Warn("failed to acknowledge agent completion mail", "error", err.Error())
+		}
+	}
 	a.runtime.safeSyncAgentWidget(ctx, call.UI(), store, agent.OwnerConversationID)
 	return waitResult(agent, snapshot)
 }
@@ -137,7 +146,7 @@ func waitResult(agent types.Agent, snapshot map[string]any) extension.ToolResult
 			content += "\n\nPartial output (agent did not complete):\n" + result
 		}
 		return toolResult(content, snapshot, message)
-	case agent.Status == types.AgentCanceling:
+	case agent.Status == types.AgentCanceling && agent.Run.Generation == agent.Generation:
 		return toolResult(fmt.Sprintf("Agent %s is still canceling. Retry followup_agent after cancellation finishes.", name), snapshot, "")
 	default:
 		return toolResult(fmt.Sprintf("Agent %s was canceled. Use followup_agent to resume it.", name), snapshot, "")

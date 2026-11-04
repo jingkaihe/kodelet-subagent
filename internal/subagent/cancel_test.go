@@ -16,6 +16,16 @@ func cancelCleanupTimeout(d time.Duration) func(*Timing) {
 	return func(t *Timing) { t.CancelCleanupTimeout = d }
 }
 
+func TestWaitResultDoesNotConfuseHistoricalCancellationWithCurrentCleanup(t *testing.T) {
+	completed := types.Agent{
+		Name: "worker", Status: types.AgentCanceling, Generation: 2,
+		Run: types.Run{Generation: 1, Status: types.RunCanceled},
+	}
+	result := waitResult(completed, nil)
+	require.NotContains(t, result.Content, "still canceling")
+	require.Contains(t, result.Content, "was canceled")
+}
+
 // startSpawn runs spawn_agent on its own goroutine.
 func (f *fixture) startSpawn(call *fakeCall, input SpawnAgentInput) <-chan extension.ToolResult {
 	result := make(chan extension.ToolResult, 1)
@@ -70,6 +80,7 @@ func TestACPCancellationRetainsClaimUntilCloseAndLabelsPartialOutput(t *testing.
 }
 
 func TestCancelPersistsCleanup(t *testing.T) {
+	t.Setenv(MailboxEnv, "enabled")
 	f := newFixture(t, cancelCleanupTimeout(10*time.Millisecond))
 	call := f.call("owner-1")
 	f.acp.update(func(a *fakeACP) { a.blockRuns, a.blockClose = true, true })
@@ -114,6 +125,17 @@ func TestCancelPersistsCleanup(t *testing.T) {
 	require.Equal(t, 1, client.closes())
 	require.Equal(t, 1, session.closes())
 	waitUntil(t, func() bool { return leases[0].closes() == 1 && f.ownedCount() == 0 })
+	identity := types.MailboxIdentity{OwnerConversationID: "owner-1", ContactID: "main"}
+	page, err := store.ListMails(f.ctx, identity, "unread", 20, 0)
+	require.NoError(t, err)
+	require.Len(t, page.Mails, 2, "the canceling wait must not consume the later cleanup notice")
+	require.Equal(t, "run_canceled", page.Mails[0].Kind)
+	require.Equal(t, firstRunID, page.Mails[0].RunID)
+	require.Equal(t, "canceled", str(f.wait(call, id, 0), "status"))
+	page, err = store.ListMails(f.ctx, identity, "unread", 20, 0)
+	require.NoError(t, err)
+	require.Len(t, page.Mails, 1)
+	require.Equal(t, "agent_joined", page.Mails[0].Kind)
 
 	again := f.cancel(call, id)
 	require.Equal(t, presentation("Cancel cancelable-worker", "Canceled. Use followup_agent to resume this agent later."), presentationOf(again))

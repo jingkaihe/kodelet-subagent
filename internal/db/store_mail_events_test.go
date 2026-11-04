@@ -54,11 +54,8 @@ func TestMailboxLifecycleRecipientsAndRunGenerations(t *testing.T) {
 	for _, mail := range completed {
 		recipients = append(recipients, mail.RecipientID)
 		require.Equal(t, worker.Lease.RunID, mail.RunID)
-		if mail.RecipientID == "main" {
-			require.Contains(t, mail.Body, "first run findings")
-		} else {
-			require.NotContains(t, mail.Body, "first run findings")
-		}
+		require.Contains(t, mail.Body, "Outcome: completed")
+		require.NotContains(t, mail.Body, "first run findings")
 	}
 	require.ElementsMatch(t, []string{"main", peer.ContactID, late.Agent.ID}, recipients)
 	_, err = store.Terminal(t.Context(), worker.Lease, types.TerminalIdle, update)
@@ -78,7 +75,8 @@ func TestMailboxLifecycleRecipientsAndRunGenerations(t *testing.T) {
 	require.Len(t, all, 6)
 	require.Equal(t, completed, all[:3])
 	require.Equal(t, second.Lease.RunID, all[3].RunID)
-	require.Contains(t, all[3].Body, "second run findings")
+	require.Contains(t, all[3].Body, "Task: second task")
+	require.NotContains(t, all[3].Body, "second run findings")
 	// Canceling an already completed agent changes no run outcome and sends no extra result.
 	_, err = store.Cancel(t.Context(), "owner", worker.Agent.ID)
 	require.NoError(t, err)
@@ -147,8 +145,9 @@ func TestMailboxPublishesEveryTerminalPathOnce(t *testing.T) {
 			require.Equal(t, claim.Lease.RunID, mails[0].RunID)
 			require.Equal(t, "main", mails[0].RecipientID)
 			if outcome == "failed" || outcome == "interrupted" {
-				require.Contains(t, mails[0].Body, "Partial result")
+				require.Contains(t, mails[0].Body, "Error: detail")
 			}
+			require.NotContains(t, mails[0].Body, "output")
 			if outcome == "startup-failed" {
 				require.Empty(t, eventMails(t, store, claim.Agent.ID, "agent_joined"))
 				retry, err := store.Claim(t.Context(), "owner", claim.Agent.ID, "retry startup")
@@ -221,7 +220,7 @@ func TestMailboxLifecyclePublicationIsAtomic(t *testing.T) {
 	}
 }
 
-func TestMailboxTerminalResultsAreBoundedUTF8(t *testing.T) {
+func TestMailboxTerminalSummariesNeverCopyResults(t *testing.T) {
 	for _, tc := range []struct {
 		name, result string
 	}{
@@ -241,7 +240,7 @@ func TestMailboxTerminalResultsAreBoundedUTF8(t *testing.T) {
 			require.LessOrEqual(t, len(mails[0].Body), MaxMailBodyBytes)
 			require.LessOrEqual(t, mailReadBytes(mails[0].mail()), MaxMailReadBytes)
 			require.True(t, utf8.ValidString(mails[0].Body))
-			require.Contains(t, mails[0].Body, "Truncated")
+			require.Equal(t, "Agent: worker ("+claim.Agent.ID+")\nRun: "+claim.Lease.RunID+"\nTask: worker task\nOutcome: completed", mails[0].Body)
 			read, err := store.ReadMails(t.Context(), main, []int64{mails[0].ID})
 			require.NoError(t, err)
 			require.Equal(t, mails[0].Body, read[0].Body)
@@ -251,6 +250,59 @@ func TestMailboxTerminalResultsAreBoundedUTF8(t *testing.T) {
 			require.Equal(t, tc.result, *agent.Run.Result)
 		})
 	}
+}
+
+func TestAcknowledgeTerminalMailScopesRunOwnerAndRecipient(t *testing.T) {
+	store, clock := mailboxStore(t, true)
+	main := mailboxIdentity(t, store, "owner", true)
+	peer := startMailAgent(t, store, mailAgent(t, store, "owner", "peer"))
+	first := mailAgent(t, store, "owner", "worker")
+	worker := startMailAgent(t, store, first)
+	_, err := store.Terminal(t.Context(), first.Lease, types.TerminalIdle, types.TerminalUpdate{Result: new("first findings")})
+	require.NoError(t, err)
+	second, err := store.Claim(t.Context(), "owner", first.Agent.ID, "second task")
+	require.NoError(t, err)
+	startMailAgent(t, store, second)
+	_, err = store.Terminal(t.Context(), second.Lease, types.TerminalIdle, types.TerminalUpdate{Result: new("second findings")})
+	require.NoError(t, err)
+	explicit, err := store.SendMail(t.Context(), worker, "main", "worker completed", "Explicit message, not a notification")
+	require.NoError(t, err)
+	before, err := store.ListMails(t.Context(), main, "unread", 20, 0)
+	require.NoError(t, err)
+	peerBefore, err := store.ListMails(t.Context(), peer, "unread", 20, 0)
+	require.NoError(t, err)
+	for _, scope := range [][3]string{
+		{"other-owner", first.Agent.ID, first.Lease.RunID},
+		{"owner", peer.ContactID, first.Lease.RunID},
+		{"owner", first.Agent.ID, "missing-run"},
+	} {
+		require.NoError(t, store.AckTerminalMail(t.Context(), scope[0], scope[1], scope[2]))
+	}
+	unchanged, err := store.ListMails(t.Context(), main, "unread", 20, 0)
+	require.NoError(t, err)
+	require.Equal(t, before, unchanged)
+	require.NoError(t, store.AckTerminalMail(t.Context(), "owner", first.Agent.ID, first.Lease.RunID))
+	completed := eventMails(t, store, first.Agent.ID, "run_completed")
+	for _, mail := range completed {
+		if mail.RecipientID == "main" && mail.RunID == first.Lease.RunID {
+			require.NotNil(t, mail.ReadAt)
+		} else {
+			require.Nil(t, mail.ReadAt, "later generations and peers stay unread")
+		}
+	}
+	clock.advance(1)
+	require.NoError(t, store.AckTerminalMail(t.Context(), "owner", first.Agent.ID, first.Lease.RunID))
+	require.Equal(t, completed, eventMails(t, store, first.Agent.ID, "run_completed"), "the first read timestamp is retained")
+	remaining, err := store.ListMails(t.Context(), main, "unread", 20, 0)
+	require.NoError(t, err)
+	require.Equal(t, before.UnreadCount-1, remaining.UnreadCount)
+	require.Equal(t, explicit.ID, remaining.Mails[0].ID)
+	for _, mail := range eventMails(t, store, first.Agent.ID, "agent_joined") {
+		require.Nil(t, mail.ReadAt)
+	}
+	peerAfter, err := store.ListMails(t.Context(), peer, "unread", 20, 0)
+	require.NoError(t, err)
+	require.Equal(t, peerBefore, peerAfter)
 }
 
 func TestMailboxStoreFlagDoesNotReplayOldEvents(t *testing.T) {
