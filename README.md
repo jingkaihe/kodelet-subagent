@@ -47,7 +47,7 @@ Fresh agents use the parent conversation's model profile. To use a different pro
 
 ## Agent mailboxes (opt-in)
 
-Requires Kodelet `7926aa6e` (0.8.20-beta development build) or later for hidden turn-end reminders. Set `KODELET_AGENT_MAILBOX=enabled` on the runner hosting main and worker conversations, then restart it. Participants share the extension's data directory; each has its own inbox scoped to the main conversation. Workers can message main and one another without gaining lifecycle controls.
+Requires Kodelet 0.8.21-beta or later. Set `KODELET_AGENT_MAILBOX=enabled` on the runner hosting main and worker conversations, then restart it. Participants share the extension's data directory; each has its own inbox scoped to the main conversation. Workers can message main and one another without gaining lifecycle controls.
 
 | Tool | Purpose |
 | --- | --- |
@@ -55,10 +55,6 @@ Requires Kodelet `7926aa6e` (0.8.20-beta development build) or later for hidden 
 | `message_contact({contact_id, subject, body})` | Send attributed mail without waking or interrupting its recipient. |
 | `list_mails({status?, limit?, offset?})` | List headers only; defaults to unread, newest first. |
 | `read_mails({ids})` | Read bodies and atomically mark them read; safe to re-read. |
-
-New workers and finished runs notify the other participants automatically. Completion mail contains summaries only; `wait_agent` marks main's notice for the returned terminal run read. A widget shows nonempty inboxes, and new arrivals trigger one hidden, deduplicated reminder at `turn.end` without changing the system prompt. Unchanged unread mail is not repeatedly announced.
-
-Read batches are size-limited and fail atomically; retry fewer IDs if needed. When draining unread mail, keep offset zero because reading removes entries from that filtered list. Recipient widgets refresh on their next mailbox tool call or lifecycle hook, not immediately on send. Mail never wakes idle agents; use `followup_agent` to start more work.
 
 ## Commands
 
