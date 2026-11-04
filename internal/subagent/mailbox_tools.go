@@ -145,7 +145,6 @@ func (a *Application) MessageContact(ctx context.Context, input MessageContactIn
 	if err != nil {
 		return toolError(err.Error(), summary)
 	}
-	a.refreshMailboxWidget(ctx, call, store, identity)
 	content := fmt.Sprintf("Stored mail #%d from %s to %s.\nSubject: %s\nThe recipient has not been woken; storage does not confirm reading.",
 		mail.ID, mail.Sender.Name, mail.RecipientID, mail.Subject)
 	return toolResult(content, map[string]any{

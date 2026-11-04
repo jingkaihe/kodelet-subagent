@@ -58,7 +58,7 @@ Requires Kodelet `7926aa6e` (0.8.20-beta development build) or later for hidden 
 
 New workers and finished runs notify the other participants automatically. Main receives bounded results; peers receive summaries. An inbox widget shows unread mail, and new arrivals trigger one hidden, deduplicated reminder at `turn.end` without changing the system prompt. Unchanged unread mail is not repeatedly announced.
 
-Read batches are size-limited and fail atomically; retry fewer IDs if needed. When draining unread mail, keep offset zero because reading removes entries from that filtered list. Mail never wakes idle agents; use `followup_agent` to start more work.
+Read batches are size-limited and fail atomically; retry fewer IDs if needed. When draining unread mail, keep offset zero because reading removes entries from that filtered list. Recipient widgets refresh on their next mailbox tool call or lifecycle hook, not immediately on send. Mail never wakes idle agents; use `followup_agent` to start more work.
 
 ## Commands
 

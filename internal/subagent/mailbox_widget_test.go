@@ -70,3 +70,23 @@ func TestMailboxWidgetCannotHoldUpCommittedToolReplies(t *testing.T) {
 		}
 	}
 }
+
+func TestSendingMailDoesNotRefreshSendersInbox(t *testing.T) {
+	t.Setenv(MailboxEnv, "enabled")
+	f := newFixture(t)
+	call := f.call("owner-1")
+	store := f.store(call)
+	worker := mailboxWorker(t, f, store, "receiver")
+	_, _, err := f.app.mailboxForCall(f.ctx, call)
+	require.NoError(t, err)
+	call.ui.block, call.ui.blockStarted = newEvent(), newEvent()
+	defer call.ui.block.set()
+	result := f.app.MessageContact(f.ctx, MessageContactInput{ContactID: worker.ID, Subject: "Hello", Body: "Read later"}, call)
+	require.Empty(t, result.Error)
+	select {
+	case <-call.ui.blockStarted.ch:
+		t.Fatal("sending must not refresh the sender's unchanged inbox")
+	default:
+	}
+	require.Empty(t, call.ui.text(mailboxWidgetID))
+}
