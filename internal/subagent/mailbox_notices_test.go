@@ -46,7 +46,7 @@ func TestMailboxHooksCacheMembershipAndReuseSnapshot(t *testing.T) {
 	h := f.harness(t)
 	for range 3 {
 		_, err := h.HandleEvent(f.ctx, "agent.init", map[string]any{
-			"allowedTools": []string{"list_mails", "read_mails"},
+			"allowedTools": []string{"list_agent_messages", "read_agent_messages"},
 		}, owner("owner-1"))
 		require.NoError(t, err)
 	}
@@ -125,7 +125,7 @@ func TestMailboxWidgetFailureKeepsReminderAndIsRetryable(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Len(t, page.Mails, 1)
 	require.NotContains(t, f.runtime.mailboxWidgets, mailboxWidgetKey(store, identity))
-	f.app.noteMailboxTools(extension.AgentInitEvent{AllowedTools: []string{"list_mails", "read_mails"}}, call)
+	f.app.noteMailboxTools(extension.AgentInitEvent{AllowedTools: []string{"list_agent_messages", "read_agent_messages"}}, call)
 	require.Len(t, f.app.mailboxFollowUp(f.ctx, call).FollowUps, 1)
 	call.ui.block.set()
 	require.Len(t, f.app.mailboxFollowUp(f.ctx, call).FollowUps, 1)
@@ -143,7 +143,7 @@ func TestMailboxNoticesPreserveSystemPromptAndStructuredResults(t *testing.T) {
 	require.NoError(t, err)
 	h := f.harness(t)
 	init, err := h.HandleEvent(f.ctx, "agent.init", map[string]any{
-		"systemPrompt": "Keep this cached", "allowedTools": []string{"list_mails", "read_mails"},
+		"systemPrompt": "Keep this cached", "allowedTools": []string{"list_agent_messages", "read_agent_messages"},
 	}, owner("owner-1"))
 	require.NoError(t, err)
 	require.Nil(t, init.SystemPrompt)
@@ -168,6 +168,8 @@ func TestMailboxNoticesPreserveSystemPromptAndStructuredResults(t *testing.T) {
 		require.Equal(t, "mailbox:owner-1:main", notice.Key)
 		require.Equal(t, mail.ID, notice.Revision)
 		require.Contains(t, notice.Text, "1 unread messages")
+		require.Contains(t, notice.Text, "list_agent_messages")
+		require.Contains(t, notice.Text, "read_agent_messages")
 		require.NotContains(t, notice.Text, "Private subject")
 		require.NotContains(t, notice.Text, "Private body")
 	}
@@ -189,9 +191,11 @@ func TestMailboxFollowUpsUseReplayableInboxRevisions(t *testing.T) {
 	sender, _ := mailboxSender(t, f, store, "owner-1")
 	first, err := store.SendMail(f.ctx, sender, "main", "Notice", "Read me")
 	require.NoError(t, err)
-	init := extension.AgentInitEvent{AllowedTools: []string{"list_mails", "read_mails"}}
-	f.app.noteMailboxTools(extension.AgentInitEvent{}, call)
-	require.Empty(t, f.app.mailboxFollowUp(f.ctx, call).FollowUps)
+	init := extension.AgentInitEvent{AllowedTools: []string{"list_agent_messages", "read_agent_messages"}}
+	for _, allowed := range [][]string{nil, {"list_agent_messages"}, {"read_agent_messages"}} {
+		f.app.noteMailboxTools(extension.AgentInitEvent{AllowedTools: allowed}, call)
+		require.Empty(t, f.app.mailboxFollowUp(f.ctx, call).FollowUps)
+	}
 	f.app.noteMailboxTools(init, call)
 	initial := f.app.mailboxFollowUp(f.ctx, call)
 	require.Len(t, initial.FollowUps, 1)
@@ -272,7 +276,7 @@ func TestMailboxPassiveHooksDoNotEnrollInactiveConversation(t *testing.T) {
 	h := f.harness(t)
 	for _, event := range []string{"session.start", "agent.start", "agent.init", "turn.end"} {
 		result, err := h.HandleEvent(f.ctx, event, map[string]any{
-			"allowedTools": []string{"list_mails", "read_mails"},
+			"allowedTools": []string{"list_agent_messages", "read_agent_messages"},
 		}, owner("owner-1"))
 		require.NoError(t, err)
 		require.Empty(t, result.FollowUps)
@@ -307,7 +311,7 @@ func TestMailboxReadingLastMailRemovesWidget(t *testing.T) {
 	require.NoError(t, err)
 	mail, err := store.SendMail(f.ctx, types.MailboxIdentity{OwnerConversationID: identity.OwnerConversationID, ContactID: claim.Agent.ID}, "main", "Notice", "body")
 	require.NoError(t, err)
-	f.app.noteMailboxTools(extension.AgentInitEvent{AllowedTools: []string{"list_mails", "read_mails"}}, call)
+	f.app.noteMailboxTools(extension.AgentInitEvent{AllowedTools: []string{"list_agent_messages", "read_agent_messages"}}, call)
 	require.Len(t, f.app.mailboxFollowUp(f.ctx, call).FollowUps, 1)
 	require.Contains(t, call.ui.text(mailboxWidgetID), "1 unread")
 	result := f.app.ReadMails(f.ctx, ReadMailsInput{IDs: []int64{mail.ID}}, call)

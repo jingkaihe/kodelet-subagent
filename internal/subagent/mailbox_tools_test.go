@@ -15,13 +15,13 @@ import (
 
 func TestMailboxToolInputSchemas(t *testing.T) {
 	defaults := ListMailsInput{Status: "unread", Limit: 20}
-	listed, err := decodeInput("list_mails", json.RawMessage(`{}`), defaults)
+	listed, err := decodeInput("list_agent_messages", json.RawMessage(`{}`), defaults)
 	require.NoError(t, err)
 	require.Equal(t, defaults, listed)
-	listed, err = decodeInput("list_mails", json.RawMessage(`{"limit":2.0,"offset":1.0,"status":"all"}`), defaults)
+	listed, err = decodeInput("list_agent_messages", json.RawMessage(`{"limit":2.0,"offset":1.0,"status":"all"}`), defaults)
 	require.NoError(t, err)
 	require.Equal(t, ListMailsInput{Status: "all", Limit: 2, Offset: 1}, listed)
-	read, err := decodeInput("read_mails", json.RawMessage(`{"ids":[1.0,2e0]}`), ReadMailsInput{})
+	read, err := decodeInput("read_agent_messages", json.RawMessage(`{"ids":[1.0,2e0]}`), ReadMailsInput{})
 	require.NoError(t, err)
 	require.Equal(t, []int64{1, 2}, read.IDs)
 
@@ -30,7 +30,7 @@ func TestMailboxToolInputSchemas(t *testing.T) {
 		`{"offset":-1}`, `{"offset":0.5}`, `{"offset":1e30}`, `{"status":null}`,
 		`{"owner_conversation_id":"someone-else"}`,
 	} {
-		_, err := decodeInput("list_mails", json.RawMessage(input), defaults)
+		_, err := decodeInput("list_agent_messages", json.RawMessage(input), defaults)
 		require.Error(t, err, input)
 	}
 	for _, input := range []string{
@@ -38,7 +38,7 @@ func TestMailboxToolInputSchemas(t *testing.T) {
 		`{"ids":[1.5]}`, `{"ids":[1,2,3,4,5,6,7,8,9,10,11]}`,
 		`{"ids":[9007199254740992]}`, `{"ids":[1],"mark_read":false}`,
 	} {
-		_, err := decodeInput("read_mails", json.RawMessage(input), ReadMailsInput{})
+		_, err := decodeInput("read_agent_messages", json.RawMessage(input), ReadMailsInput{})
 		require.Error(t, err, input)
 	}
 	for _, input := range []map[string]any{
@@ -50,7 +50,7 @@ func TestMailboxToolInputSchemas(t *testing.T) {
 	} {
 		raw, err := json.Marshal(input)
 		require.NoError(t, err)
-		_, err = decodeInput("message_contact", raw, MessageContactInput{})
+		_, err = decodeInput("send_agent_message", raw, MessageContactInput{})
 		require.Error(t, err)
 	}
 }
@@ -78,7 +78,27 @@ func TestMailboxToolRegistrationAndDisabledHandlers(t *testing.T) {
 	defer child.conn.Close(nil)
 	// Messaging does not require a background lease or permission to manage agents.
 	manifest = child.initialize(t, 1, map[string]any{})
-	require.ElementsMatch(t, []string{"list_contacts", "message_contact", "list_mails", "read_mails"}, toolNames(manifest))
+	require.ElementsMatch(t, []string{"list_agent_contacts", "send_agent_message", "list_agent_messages", "read_agent_messages"}, toolNames(manifest))
+	shorts := map[string]string{
+		"list_agent_contacts": "Discover agent contacts for inter-agent messaging.",
+		"send_agent_message":  "Send an inter-agent inbox message to the recipient.",
+		"list_agent_messages": "List agent inbox headers and team updates.",
+		"read_agent_messages": "Read selected agent inbox messages and mark them read.",
+	}
+	for _, raw := range manifest["tools"].([]any) {
+		tool := raw.(map[string]any)
+		name := tool["name"].(string)
+		require.Equal(t, shorts[name], tool["short"], name)
+		require.Contains(t, tool["description"], "agent", name)
+		input, output := toolSchemas[name].clone()
+		require.Equal(t, input, tool["inputSchema"], name)
+		require.Equal(t, output, tool["outputSchema"], name)
+		if name == "send_agent_message" {
+			for _, related := range []string{"list_agent_contacts", "list_agent_messages", "read_agent_messages", "steer_agent", "followup_agent"} {
+				require.Contains(t, tool["description"], related)
+			}
+		}
+	}
 }
 
 func executeMailbox(t *testing.T, f *fixture, h *extensiontest.Harness, caller extension.CallInfo, name string, input map[string]any) (extension.ToolResult, map[string]any) {
@@ -130,7 +150,7 @@ func TestMailboxToolsWorkerMessagingAndReadState(t *testing.T) {
 	worker := extension.CallInfo{ConversationID: *first.ConversationID, InvokedBy: "subagent"}
 	reviewer := extension.CallInfo{ConversationID: *second.ConversationID, InvokedBy: "subagent"}
 
-	_, contacts := executeMailbox(t, f, h, worker, "list_contacts", map[string]any{})
+	_, contacts := executeMailbox(t, f, h, worker, "list_agent_contacts", map[string]any{})
 	require.Equal(t, first.ID, contacts["self_contact_id"])
 	require.Len(t, contacts["contacts"], 3)
 	for _, recipient := range []struct {
@@ -139,7 +159,7 @@ func TestMailboxToolsWorkerMessagingAndReadState(t *testing.T) {
 	}{
 		{"main", main}, {second.ID, reviewer},
 	} {
-		sent, data := executeMailbox(t, f, h, worker, "message_contact", map[string]any{
+		sent, data := executeMailbox(t, f, h, worker, "send_agent_message", map[string]any{
 			"contact_id": recipient.id, "subject": "Review findings", "body": "**Do not render as Markdown**\nThe cancellation path needs a test.",
 		})
 		mail := data["mail"].(map[string]any)
@@ -150,7 +170,7 @@ func TestMailboxToolsWorkerMessagingAndReadState(t *testing.T) {
 		require.NotContains(t, mail, "body")
 		require.NotContains(t, sent.Content, "cancellation path")
 
-		listed, inbox := executeMailbox(t, f, h, recipient.call, "list_mails", map[string]any{})
+		listed, inbox := executeMailbox(t, f, h, recipient.call, "list_agent_messages", map[string]any{})
 		require.Equal(t, float64(1), inbox["unread_count"])
 		require.False(t, inbox["has_more"].(bool))
 		listedMail := inbox["mails"].([]any)[0].(map[string]any)
@@ -159,19 +179,19 @@ func TestMailboxToolsWorkerMessagingAndReadState(t *testing.T) {
 		require.NotContains(t, listedMail, "body")
 		require.NotContains(t, listed.Content, "cancellation path")
 
-		read, batch := executeMailbox(t, f, h, recipient.call, "read_mails", map[string]any{"ids": []any{id}})
+		read, batch := executeMailbox(t, f, h, recipient.call, "read_agent_messages", map[string]any{"ids": []any{id}})
 		readMail := batch["mails"].([]any)[0].(map[string]any)
 		require.NotNil(t, readMail["read_at"])
 		require.Contains(t, readMail["body"], "cancellation path")
 		require.Contains(t, read.Content, "From: researcher (agent; "+first.ID+")")
 		require.Contains(t, read.Content, "**Do not render as Markdown**")
 		require.NotContains(t, read.Data, "mails", "mail bodies must not be duplicated in presentation metadata")
-		_, again := executeMailbox(t, f, h, recipient.call, "read_mails", map[string]any{"ids": []any{id}})
+		_, again := executeMailbox(t, f, h, recipient.call, "read_agent_messages", map[string]any{"ids": []any{id}})
 		require.Equal(t, batch, again, "reads must be replayable with the original read timestamp")
-		_, unread := executeMailbox(t, f, h, recipient.call, "list_mails", map[string]any{})
+		_, unread := executeMailbox(t, f, h, recipient.call, "list_agent_messages", map[string]any{})
 		require.Zero(t, unread["unread_count"])
 		require.Empty(t, unread["mails"])
-		_, all := executeMailbox(t, f, h, recipient.call, "list_mails", map[string]any{"status": "read"})
+		_, all := executeMailbox(t, f, h, recipient.call, "list_agent_messages", map[string]any{"status": "read"})
 		require.Len(t, all["mails"], 1)
 	}
 	// Mail sent to an idle recipient must not start another run.
@@ -189,29 +209,29 @@ func TestMailboxToolsRejectCrossInboxReadsAndOversizedBatches(t *testing.T) {
 	store := f.store(f.call("owner-1"))
 	_, sender := mailboxSender(t, f, store, "owner-1")
 	_, other := mailboxSender(t, f, store, "owner-2")
-	_, foreign := executeMailbox(t, f, h, other, "message_contact", map[string]any{"contact_id": "main", "subject": "Private", "body": "other inbox"})
+	_, foreign := executeMailbox(t, f, h, other, "send_agent_message", map[string]any{"contact_id": "main", "subject": "Private", "body": "other inbox"})
 	foreignID := foreign["mail"].(map[string]any)["id"]
 	ids := make([]any, 0, 4)
 	for range 4 {
-		_, sent := executeMailbox(t, f, h, sender, "message_contact", map[string]any{
+		_, sent := executeMailbox(t, f, h, sender, "send_agent_message", map[string]any{
 			"contact_id": "main", "subject": "Large message", "body": strings.Repeat("x", db.MaxMailBodyBytes),
 		})
 		ids = append(ids, sent["mail"].(map[string]any)["id"])
 	}
 	for _, batch := range [][]any{{ids[0], foreignID}, ids, ids[:2]} {
-		result, err := h.ExecuteTool(f.ctx, "read_mails", map[string]any{"ids": batch}, extensiontest.WithCall(main))
+		result, err := h.ExecuteTool(f.ctx, "read_agent_messages", map[string]any{"ids": batch}, extensiontest.WithCall(main))
 		require.NoError(t, err)
 		require.NotEmpty(t, result.Error)
 		require.Nil(t, result.StructuredContent)
-		_, inbox := executeMailbox(t, f, h, main, "list_mails", map[string]any{})
+		_, inbox := executeMailbox(t, f, h, main, "list_agent_messages", map[string]any{})
 		require.Equal(t, float64(4), inbox["unread_count"], "failed batch must not mark any mail read")
 	}
 	// Pagination accepts integral JSON floats and doesn't mark anything read.
-	_, page := executeMailbox(t, f, h, main, "list_mails", map[string]any{"limit": 1.0, "offset": 1.0})
+	_, page := executeMailbox(t, f, h, main, "list_agent_messages", map[string]any{"limit": 1.0, "offset": 1.0})
 	require.Len(t, page["mails"], 1)
 	require.True(t, page["has_more"].(bool))
 	require.Equal(t, ids[2], page["mails"].([]any)[0].(map[string]any)["id"])
-	result, err := h.ExecuteTool(f.ctx, "message_contact", map[string]any{
+	result, err := h.ExecuteTool(f.ctx, "send_agent_message", map[string]any{
 		"contact_id": "main", "subject": strings.Repeat("界", 100), "body": "UTF-8 byte limit",
 	}, extensiontest.WithCall(sender))
 	require.NoError(t, err)
@@ -248,12 +268,12 @@ func TestMailboxReadRepliesFitCodeModeBudget(t *testing.T) {
 			_, sender := mailboxSender(t, f, f.store(f.call("owner-1")), "owner-1")
 			var ids []any
 			for range tc.count {
-				_, sent := executeMailbox(t, f, h, sender, "message_contact", map[string]any{
+				_, sent := executeMailbox(t, f, h, sender, "send_agent_message", map[string]any{
 					"contact_id": "main", "subject": tc.subject, "body": tc.body,
 				})
 				ids = append(ids, sent["mail"].(map[string]any)["id"])
 			}
-			result, data := executeMailbox(t, f, h, caller, "read_mails", map[string]any{"ids": ids})
+			result, data := executeMailbox(t, f, h, caller, "read_agent_messages", map[string]any{"ids": ids})
 			assertMailboxReplyFitsCodeMode(t, result)
 			require.Contains(t, result.Content, tc.body)
 			for _, row := range data["mails"].([]any) {
@@ -281,7 +301,7 @@ func TestMailboxLifecycleReadReplyFitsCodeModeBudget(t *testing.T) {
 	page, err := store.ListMails(f.ctx, identity, "unread", 1, 0)
 	require.NoError(t, err)
 	require.Equal(t, "run_completed", page.Mails[0].Kind)
-	result, _ := executeMailbox(t, f, f.harness(t), call.Info(), "read_mails", map[string]any{"ids": []int64{page.Mails[0].ID}})
+	result, _ := executeMailbox(t, f, f.harness(t), call.Info(), "read_agent_messages", map[string]any{"ids": []int64{page.Mails[0].ID}})
 	assertMailboxReplyFitsCodeMode(t, result)
 	require.Contains(t, result.Content, "Outcome: completed")
 	require.NotContains(t, result.Content, fullResult)

@@ -1,17 +1,17 @@
 {
   "inputs": {
-    "list_contacts": {
+    "list_agent_contacts": {
       "type": "object",
       "properties": {},
       "additionalProperties": false
     },
-    "message_contact": {
+    "send_agent_message": {
       "type": "object",
       "properties": {
         "contact_id": {
           "type": "string",
           "minLength": 1,
-          "description": "Recipient contact_id from list_contacts; main addresses the main agent."
+          "description": "Recipient contact_id from list_agent_contacts; main addresses the main agent."
         },
         "subject": {
           "type": "string",
@@ -29,7 +29,7 @@
       "required": ["contact_id", "subject", "body"],
       "additionalProperties": false
     },
-    "list_mails": {
+    "list_agent_messages": {
       "type": "object",
       "properties": {
         "status": {
@@ -53,7 +53,7 @@
       },
       "additionalProperties": false
     },
-    "read_mails": {
+    "read_agent_messages": {
       "type": "object",
       "properties": {
         "ids": {
@@ -66,7 +66,7 @@
             "minimum": 1,
             "maximum": 9007199254740991
           },
-          "description": "IDs from list_mails. Retrieves full bodies and marks read atomically. Batches exceeding the output budget fail without changing read state."
+          "description": "IDs from list_agent_messages. Retrieves full bodies and marks read atomically. Batches exceeding the output budget fail without changing read state."
         }
       },
       "required": ["ids"],

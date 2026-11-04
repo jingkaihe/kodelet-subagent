@@ -111,26 +111,27 @@ func (a *Application) registerEvents() {
 }
 
 func (a *Application) registerTools() {
-	registerTool(a, "spawn_agent", spawnAgentDescription, spawnToolTimeout,
+	registerTool(a, "spawn_agent", "", spawnAgentDescription, spawnToolTimeout,
 		func() SpawnAgentInput { return SpawnAgentInput{ContextMode: "fork"} }, a.SpawnAgent)
-	registerTool(a, "wait_agent", waitAgentDescription, waitToolTimeout,
+	registerTool(a, "wait_agent", "", waitAgentDescription, waitToolTimeout,
 		func() WaitAgentInput { return WaitAgentInput{TimeoutMS: defaultWaitMS} }, a.WaitAgent)
-	registerTool(a, "list_agents", listAgentsDescription, listToolTimeout,
+	registerTool(a, "list_agents", "", listAgentsDescription, listToolTimeout,
 		func() ListAgentsInput { return ListAgentsInput{} }, a.ListAgents)
-	registerTool(a, "followup_agent", followupAgentDescription, followupToolTimeout,
+	registerTool(a, "followup_agent", "", followupAgentDescription, followupToolTimeout,
 		func() FollowupAgentInput { return FollowupAgentInput{} }, a.FollowupAgent)
-	registerTool(a, "steer_agent", steerAgentDescription, steerToolTimeout,
+	registerTool(a, "steer_agent", "", steerAgentDescription, steerToolTimeout,
 		func() SteerAgentInput { return SteerAgentInput{} }, a.SteerAgent)
-	registerTool(a, "cancel_agent", cancelAgentDescription, cancelToolTimeout,
+	registerTool(a, "cancel_agent", "", cancelAgentDescription, cancelToolTimeout,
 		func() CancelAgentInput { return CancelAgentInput{} }, a.CancelAgent)
 }
 
 // registerTool advertises the tool's exact schemas and validates input
 // against them before decoding it into In.
-func registerTool[In any](a *Application, name, description string, timeout time.Duration, defaults func() In, handle func(context.Context, In, ToolCall) extension.ToolResult) {
+func registerTool[In any](a *Application, name, short, description string, timeout time.Duration, defaults func() In, handle func(context.Context, In, ToolCall) extension.ToolResult) {
 	input, output := toolSchemas[name].clone()
 	extension.RegisterTool(a.extension, extension.Tool[json.RawMessage]{
 		Name:         name,
+		Short:        short,
 		Description:  description,
 		InputSchema:  input,
 		OutputSchema: output,

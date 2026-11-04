@@ -23,7 +23,7 @@ func publishJoinedMailTx(tx *sqlx.Tx, agent types.Agent, now float64) error {
 	if starts != 1 {
 		return nil
 	}
-	body := fmt.Sprintf("Contact: %s\nName: %s\nTask: %s\nStatus: running\n\nUse message_contact to contact this agent.",
+	body := fmt.Sprintf("Contact: %s\nName: %s\nTask: %s\nStatus: running\n\nUse send_agent_message to contact this agent.",
 		agent.ID, agent.Name, boundedMailText(agent.Run.Task, 1_000))
 	return publishEventMailTx(tx, "joined:"+agent.ID, agent, "agent_joined", agent.Name+" joined the team", body, now)
 }

@@ -51,10 +51,10 @@ Requires Kodelet 0.8.21-beta or later. Set `KODELET_AGENT_MAILBOX=enabled` on th
 
 | Tool | Purpose |
 | --- | --- |
-| `list_contacts()` | Discover main and worker contacts. |
-| `message_contact({contact_id, subject, body})` | Send attributed mail without waking or interrupting its recipient. |
-| `list_mails({status?, limit?, offset?})` | List headers only; defaults to unread, newest first. |
-| `read_mails({ids})` | Read bodies and atomically mark them read; safe to re-read. |
+| `list_agent_contacts()` | Discover main and worker agents for inter-agent messaging. |
+| `send_agent_message({contact_id, subject, body})` | Send an inter-agent inbox message without waking or interrupting its recipient. |
+| `list_agent_messages({status?, limit?, offset?})` | List inbox headers and team updates; defaults to unread, newest first. |
+| `read_agent_messages({ids})` | Read bodies and atomically mark them read; safe to re-read. |
 
 ## Commands
 

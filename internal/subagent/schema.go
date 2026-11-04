@@ -51,7 +51,7 @@ func mustLoadToolSchemas() map[string]toolSchema {
 			"title":    "ListAgentsOutput",
 			"type":     "object",
 		},
-		"list_contacts": {
+		"list_agent_contacts": {
 			"type": "object", "additionalProperties": false,
 			"properties": map[string]any{
 				"self_contact_id": map[string]any{"type": "string"},
@@ -59,12 +59,12 @@ func mustLoadToolSchemas() map[string]toolSchema {
 			},
 			"required": []any{"self_contact_id", "contacts"},
 		},
-		"message_contact": {
+		"send_agent_message": {
 			"type": "object", "additionalProperties": false,
 			"properties": map[string]any{"mail": document.MailOutput},
 			"required":   []any{"mail"},
 		},
-		"list_mails": {
+		"list_agent_messages": {
 			"type": "object", "additionalProperties": false,
 			"properties": map[string]any{
 				"mails":        map[string]any{"type": "array", "items": document.MailOutput},
@@ -74,7 +74,7 @@ func mustLoadToolSchemas() map[string]toolSchema {
 			},
 			"required": []any{"mails", "total", "unread_count", "has_more"},
 		},
-		"read_mails": {
+		"read_agent_messages": {
 			"type": "object", "additionalProperties": false,
 			"properties": map[string]any{"mails": map[string]any{"type": "array", "items": readMail}},
 			"required":   []any{"mails"},
