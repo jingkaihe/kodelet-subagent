@@ -62,16 +62,16 @@ func (a *Application) mailboxFollowUp(ctx context.Context, call Call) extension.
 	}
 	ctx, cancel := context.WithTimeout(ctx, mailboxHookTimeout)
 	defer cancel()
-	store, identity, err := a.mailboxForCall(ctx, call)
+	store, identity, err := a.resolveMailboxForCall(ctx, call, false)
 	if err != nil {
 		return extension.EventResult{}
 	}
-	page, err := store.ListMails(ctx, identity, "unread", 1, 0)
-	if err != nil || ctx.Err() != nil {
-		return extension.EventResult{}
+	page, err := a.runtime.syncMailboxWidget(ctx, call.UI(), store, identity)
+	if err != nil && ctx.Err() == nil {
+		call.Logger().Warn("failed to refresh agent mailbox widget", "error", err.Error())
 	}
-	a.refreshMailboxWidget(ctx, call, store, identity)
-	if len(page.Mails) == 0 {
+	// UI failures must not discard a successfully read inbox snapshot.
+	if ctx.Err() != nil || len(page.Mails) == 0 {
 		return extension.EventResult{}
 	}
 	return extension.EventResult{FollowUps: []extension.FollowUp{{

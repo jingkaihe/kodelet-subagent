@@ -35,9 +35,18 @@ func MailboxEnabled(enabled bool) StoreOption {
 // ResolveMailbox resolves host identity and opts its root conversation into mail.
 // Child lookup comes first, even when the caller could otherwise be a root.
 func (s *Store) ResolveMailbox(ctx context.Context, conversationID string, allowRoot bool) (types.MailboxIdentity, error) {
+	if err := ctx.Err(); err != nil {
+		return types.MailboxIdentity{}, err
+	}
 	conversationID = strings.TrimSpace(conversationID)
 	if conversationID == "" {
 		return types.MailboxIdentity{}, errors.New("mailbox requires an active conversation ID")
+	}
+	if _, err := s.database(); err != nil {
+		return types.MailboxIdentity{}, err
+	}
+	if identity, err := s.LookupMailbox(ctx, conversationID, allowRoot); !errors.Is(err, ErrAgentNotFound) {
+		return identity, err
 	}
 	var identity types.MailboxIdentity
 	err := s.transaction(ctx, func(tx *sqlx.Tx, now float64) error {

@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"net/url"
 	"sync"
 	"time"
 
@@ -52,8 +53,10 @@ type Store struct {
 	importSource string
 	onImport     func(source, target string)
 
-	mu sync.Mutex
-	db *sqlx.DB
+	mu     sync.Mutex
+	db     *sqlx.DB
+	readMu sync.Mutex
+	readDB *sqlx.DB
 }
 
 // StoreOption configures NewStore.
@@ -95,12 +98,36 @@ func (s *Store) Now() float64 { return s.clock() }
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		return nil
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
+	var err error
+	if s.db != nil {
+		err = s.db.Close()
+		s.db = nil
 	}
-	err := s.db.Close()
-	s.db = nil
+	if s.readDB != nil {
+		err = errors.Join(err, s.readDB.Close())
+		s.readDB = nil
+	}
 	return err
+}
+
+// readDatabase never initializes or migrates a database. Its deferred,
+// read-only transactions do not compete with lease writers in WAL mode.
+// Fail fast on SQLite locks rather than outliving a hook's context deadline.
+func (s *Store) readDatabase() (*sqlx.DB, error) {
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
+	if s.readDB == nil {
+		var err error
+		s.readDB, err = sqlx.Open("sqlite", databaseURI(s.path, url.Values{
+			"mode": {"ro"}, "_pragma": {"busy_timeout(0)"},
+		}))
+		if err != nil {
+			return nil, err
+		}
+	}
+	return s.readDB, nil
 }
 
 func (s *Store) database() (*sqlx.DB, error) {

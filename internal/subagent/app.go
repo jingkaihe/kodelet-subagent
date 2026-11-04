@@ -88,11 +88,10 @@ func (a *Application) Extension() *extension.Extension { return a.extension }
 func (a *Application) Runtime() *Runtime { return a.runtime }
 
 func (a *Application) registerEvents() {
-	extension.On(a.extension, extension.EventAgentInit, func(ctx context.Context, event extension.AgentInitEvent, ec *extension.EventContext) (extension.EventResult, error) {
+	extension.On(a.extension, extension.EventAgentInit, func(_ context.Context, event extension.AgentInitEvent, ec *extension.EventContext) (extension.EventResult, error) {
 		call := newSDKEventCall(ec)
 		result := a.disableRecursiveAgents(call)
 		a.noteMailboxTools(event, call)
-		a.restoreMailboxWidget(ctx, call)
 		return result, nil
 	})
 	extension.On(a.extension, extension.EventSessionStart, func(ctx context.Context, _ extension.SessionStartEvent, ec *extension.EventContext) (extension.EventResult, error) {

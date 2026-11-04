@@ -87,6 +87,7 @@ type Store interface {
 	AcknowledgeSteering(ctx context.Context, lease *types.Lease, messageID int64) (bool, error)
 	InterruptRuntime(ctx context.Context, message string) (int, error)
 	ResolveMailbox(ctx context.Context, conversationID string, allowRoot bool) (types.MailboxIdentity, error)
+	LookupMailbox(ctx context.Context, conversationID string, allowRoot bool) (types.MailboxIdentity, error)
 	ListContacts(ctx context.Context, identity types.MailboxIdentity) ([]types.Contact, error)
 	SendMail(ctx context.Context, identity types.MailboxIdentity, recipientID, subject, body string) (types.Mail, error)
 	ListMails(ctx context.Context, identity types.MailboxIdentity, status string, limit, offset int) (types.MailPage, error)

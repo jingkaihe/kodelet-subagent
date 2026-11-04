@@ -5,11 +5,39 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jmoiron/sqlx"
 
 	"github.com/jingkaihe/kodelet-subagent/internal/types"
 )
+
+// LookupMailbox only reads existing membership; it never creates a room or
+// reconciles leases. A child session may not be attached yet, so misses can retry.
+func (s *Store) LookupMailbox(ctx context.Context, conversationID string, allowRoot bool) (types.MailboxIdentity, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return types.MailboxIdentity{}, errors.New("mailbox requires an active conversation ID")
+	}
+	database, err := s.readDatabase()
+	if err != nil {
+		return types.MailboxIdentity{}, err
+	}
+	var row struct {
+		Owner string `db:"owner_conversation_id"`
+		ID    string `db:"id"`
+	}
+	err = database.GetContext(ctx, &row, `WITH participant AS (
+		SELECT owner_conversation_id, id FROM agents WHERE child_conversation_id = ?
+		UNION ALL
+		SELECT ?, 'main' WHERE ? AND NOT EXISTS (SELECT 1 FROM agents WHERE child_conversation_id = ?)
+	) SELECT participant.* FROM participant JOIN mailbox_rooms USING (owner_conversation_id)`,
+		conversationID, conversationID, allowRoot, conversationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return types.MailboxIdentity{}, newError(kindNotFound, "conversation is not a registered mailbox participant")
+	}
+	return types.MailboxIdentity{OwnerConversationID: row.Owner, ContactID: row.ID}, err
+}
 
 type mailRow struct {
 	ID          int64    `db:"id"`
@@ -53,19 +81,34 @@ func (s *Store) ListMails(ctx context.Context, identity types.MailboxIdentity, s
 		return types.MailPage{}, errors.New("mail status must be unread, read, or all")
 	}
 	page := types.MailPage{Mails: []types.Mail{}}
-	err := s.transaction(ctx, func(tx *sqlx.Tx, _ float64) error {
-		if _, err := validateMailboxTx(tx, identity); err != nil {
+	database, err := s.readDatabase()
+	if err != nil {
+		return types.MailPage{}, err
+	}
+	tx, err := database.BeginTxx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return types.MailPage{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	err = func() error {
+		var valid bool
+		if err := tx.GetContext(ctx, &valid, `SELECT EXISTS (SELECT 1 FROM mailbox_rooms WHERE owner_conversation_id = ?)
+			AND (? = 'main' OR EXISTS (SELECT 1 FROM agents WHERE owner_conversation_id = ? AND id = ?))`,
+			identity.OwnerConversationID, identity.ContactID, identity.OwnerConversationID, identity.ContactID); err != nil {
 			return err
+		}
+		if !valid || identity.OwnerConversationID == "" || identity.ContactID == "system" {
+			return newError(kindNotFound, "mailbox participant not found")
 		}
 		const scope = ` FROM mails WHERE owner_conversation_id = ? AND recipient_id = ?`
-		if err := tx.Get(&page.Total, `SELECT COUNT(*)`+scope+filter, identity.OwnerConversationID, identity.ContactID); err != nil {
+		if err := tx.GetContext(ctx, &page.Total, `SELECT COUNT(*)`+scope+filter, identity.OwnerConversationID, identity.ContactID); err != nil {
 			return err
 		}
-		if err := tx.Get(&page.UnreadCount, `SELECT COUNT(*)`+scope+` AND read_at IS NULL`, identity.OwnerConversationID, identity.ContactID); err != nil {
+		if err := tx.GetContext(ctx, &page.UnreadCount, `SELECT COUNT(*)`+scope+` AND read_at IS NULL`, identity.OwnerConversationID, identity.ContactID); err != nil {
 			return err
 		}
 		var rows []mailRow
-		if err := tx.Select(&rows, `SELECT `+mailColumns+scope+filter+` ORDER BY id DESC LIMIT ? OFFSET ?`,
+		if err := tx.SelectContext(ctx, &rows, `SELECT `+mailColumns+scope+filter+` ORDER BY id DESC LIMIT ? OFFSET ?`,
 			identity.OwnerConversationID, identity.ContactID, limit, offset); err != nil {
 			return err
 		}
@@ -74,7 +117,7 @@ func (s *Store) ListMails(ctx context.Context, identity types.MailboxIdentity, s
 		}
 		page.HasMore = offset < page.Total && len(rows) < page.Total-offset
 		return nil
-	})
+	}()
 	if err != nil {
 		return types.MailPage{}, err
 	}

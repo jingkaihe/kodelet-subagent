@@ -112,16 +112,18 @@ type Runtime struct {
 	timing         Timing
 	mailboxEnabled bool
 
-	mu              sync.Mutex
-	stores          map[string]Store
-	liveRuns        map[runKey]*LiveRun
-	ownedRuns       map[runKey]*LiveRun
-	setupTasks      map[*task]struct{}
-	cleanupTasks    map[*task]struct{}
-	reservations    map[chan struct{}]struct{}
-	widgetLocks     map[runKey]*sync.Mutex
-	mailboxReadable map[runKey]bool
-	shuttingDown    bool
+	mu                sync.Mutex
+	stores            map[string]Store
+	liveRuns          map[runKey]*LiveRun
+	ownedRuns         map[runKey]*LiveRun
+	setupTasks        map[*task]struct{}
+	cleanupTasks      map[*task]struct{}
+	reservations      map[chan struct{}]struct{}
+	widgetLocks       map[runKey]*sync.Mutex
+	mailboxReadable   map[runKey]bool
+	mailboxIdentities map[runKey]types.MailboxIdentity
+	mailboxWidgets    map[runKey]mailboxWidgetState
+	shuttingDown      bool
 
 	shutdownMu sync.Mutex
 	shutdownOp *task
@@ -151,19 +153,21 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 		}
 	}
 	return &Runtime{
-		runtimeID:       runtimeID,
-		clientFactory:   clientFactory,
-		newStore:        newStore,
-		timing:          timing,
-		mailboxEnabled:  mailboxEnabled,
-		stores:          map[string]Store{},
-		liveRuns:        map[runKey]*LiveRun{},
-		ownedRuns:       map[runKey]*LiveRun{},
-		setupTasks:      map[*task]struct{}{},
-		cleanupTasks:    map[*task]struct{}{},
-		reservations:    map[chan struct{}]struct{}{},
-		widgetLocks:     map[runKey]*sync.Mutex{},
-		mailboxReadable: map[runKey]bool{},
+		runtimeID:         runtimeID,
+		clientFactory:     clientFactory,
+		newStore:          newStore,
+		timing:            timing,
+		mailboxEnabled:    mailboxEnabled,
+		stores:            map[string]Store{},
+		liveRuns:          map[runKey]*LiveRun{},
+		ownedRuns:         map[runKey]*LiveRun{},
+		setupTasks:        map[*task]struct{}{},
+		cleanupTasks:      map[*task]struct{}{},
+		reservations:      map[chan struct{}]struct{}{},
+		widgetLocks:       map[runKey]*sync.Mutex{},
+		mailboxReadable:   map[runKey]bool{},
+		mailboxIdentities: map[runKey]types.MailboxIdentity{},
+		mailboxWidgets:    map[runKey]mailboxWidgetState{},
 	}
 }
 
@@ -192,6 +196,15 @@ func databasePath(call Call) string {
 
 // storeForCall returns the initialized store for the call's data directory.
 func (r *Runtime) storeForCall(ctx context.Context, call Call) (Store, error) {
+	store := r.store(call)
+	if err := store.Initialize(ctx); err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+// store returns a handle without initializing, reconciling, or creating state.
+func (r *Runtime) store(call Call) Store {
 	path := databasePath(call)
 	r.mu.Lock()
 	store := r.stores[path]
@@ -200,10 +213,7 @@ func (r *Runtime) storeForCall(ctx context.Context, call Call) (Store, error) {
 		r.stores[path] = store
 	}
 	r.mu.Unlock()
-	if err := store.Initialize(ctx); err != nil {
-		return nil, err
-	}
-	return store, nil
+	return store
 }
 
 func (r *Runtime) liveRun(store Store, agentID string) *LiveRun {
@@ -253,7 +263,7 @@ func (r *Runtime) syncAgentWidget(ctx context.Context, ui WidgetUI, store Store,
 func (r *Runtime) safeSyncAgentWidget(ctx context.Context, ui WidgetUI, store Store, ownerID string) {
 	_ = r.syncAgentWidget(ctx, ui, store, ownerID)
 	if r.mailboxEnabled {
-		_ = r.syncMailboxWidget(ctx, ui, store, types.MailboxIdentity{OwnerConversationID: ownerID, ContactID: "main"})
+		_, _ = r.syncMailboxWidget(ctx, ui, store, types.MailboxIdentity{OwnerConversationID: ownerID, ContactID: "main"})
 	}
 }
 

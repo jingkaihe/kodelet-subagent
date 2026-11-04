@@ -2,13 +2,135 @@ package subagent
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/jingkaihe/kodelet/sdk/go/extension"
 	"github.com/stretchr/testify/require"
 
+	"github.com/jingkaihe/kodelet-subagent/internal/db"
 	"github.com/jingkaihe/kodelet-subagent/internal/types"
 )
+
+type mailboxCountingStore struct {
+	Store
+	initializes, resolves, lookups, snapshots int
+}
+
+func (s *mailboxCountingStore) Initialize(ctx context.Context) error {
+	s.initializes++
+	return s.Store.Initialize(ctx)
+}
+
+func (s *mailboxCountingStore) ResolveMailbox(ctx context.Context, conversation string, allowRoot bool) (types.MailboxIdentity, error) {
+	s.resolves++
+	return s.Store.ResolveMailbox(ctx, conversation, allowRoot)
+}
+
+func (s *mailboxCountingStore) LookupMailbox(ctx context.Context, conversation string, allowRoot bool) (types.MailboxIdentity, error) {
+	s.lookups++
+	return s.Store.LookupMailbox(ctx, conversation, allowRoot)
+}
+
+func (s *mailboxCountingStore) ListMails(ctx context.Context, identity types.MailboxIdentity, status string, limit, offset int) (types.MailPage, error) {
+	s.snapshots++
+	return s.Store.ListMails(ctx, identity, status, limit, offset)
+}
+
+func TestMailboxHooksCacheMembershipAndReuseSnapshot(t *testing.T) {
+	t.Setenv(MailboxEnv, "enabled")
+	f := newFixture(t)
+	call := f.call("owner-1")
+	store := &mailboxCountingStore{Store: f.runtime.store(call)}
+	f.runtime.stores[store.Path()] = store
+	h := f.harness(t)
+	for range 3 {
+		_, err := h.HandleEvent(f.ctx, "agent.init", map[string]any{
+			"allowedTools": []string{"list_mails", "read_mails"},
+		}, owner("owner-1"))
+		require.NoError(t, err)
+	}
+	require.Zero(t, store.initializes)
+	require.Zero(t, store.resolves)
+	require.Zero(t, store.lookups)
+	require.Zero(t, store.snapshots)
+	_, identity, err := f.app.mailboxForCall(f.ctx, call)
+	require.NoError(t, err)
+	claim, err := store.Create(f.ctx, identity.OwnerConversationID, "researcher", "task", f.cwd, types.ContextFresh)
+	require.NoError(t, err)
+	_, err = store.SendMail(f.ctx, types.MailboxIdentity{OwnerConversationID: identity.OwnerConversationID, ContactID: claim.Agent.ID}, "main", "Notice", "body")
+	require.NoError(t, err)
+	for range 3 {
+		_, same, err := f.app.mailboxForCall(f.ctx, call)
+		require.NoError(t, err)
+		require.Equal(t, identity, same)
+		require.Len(t, f.app.mailboxFollowUp(f.ctx, call).FollowUps, 1)
+	}
+	require.Equal(t, 1, store.resolves)
+	require.Zero(t, store.initializes)
+	require.Zero(t, store.lookups)
+	require.Equal(t, 3, store.snapshots, "one inbox snapshot per turn.end")
+	// An unchanged inbox must not call the UI again.
+	call.ui.block, call.ui.blockStarted = newEvent(), newEvent()
+	defer call.ui.block.set()
+	require.Len(t, f.app.mailboxFollowUp(f.ctx, call).FollowUps, 1)
+	select {
+	case <-call.ui.blockStarted.ch:
+		t.Fatal("unchanged inbox was rendered again")
+	default:
+	}
+
+	// The same conversation in another database must not reuse this membership.
+	other := f.call("owner-1")
+	other.dataDir = filepath.Join(t.TempDir(), "other")
+	_, _, err = f.app.resolveMailboxForCall(f.ctx, other, false)
+	require.Error(t, err)
+	require.NotContains(t, f.runtime.mailboxIdentities, mailboxNoticeKey(other))
+	_, _, err = f.app.resolveMailboxForCall(f.ctx, f.call("owner-2"), false)
+	require.ErrorIs(t, err, db.ErrAgentNotFound)
+}
+
+func TestMailboxHooksRetryUnattachedChildMembership(t *testing.T) {
+	t.Setenv(MailboxEnv, "enabled")
+	f := newFixture(t)
+	parent := f.call("owner-1")
+	store, _, err := f.app.mailboxForCall(f.ctx, parent)
+	require.NoError(t, err)
+	child := f.call("child-conversation", invokedBy("subagent"))
+	_, _, err = f.app.resolveMailboxForCall(f.ctx, child, false)
+	require.ErrorIs(t, err, db.ErrAgentNotFound)
+	claim, err := store.Create(f.ctx, "owner-1", "researcher", "task", f.cwd, types.ContextFresh)
+	require.NoError(t, err)
+	_, err = store.AttachConversation(f.ctx, claim.Lease, "child-conversation")
+	require.NoError(t, err)
+	_, identity, err := f.app.resolveMailboxForCall(f.ctx, child, false)
+	require.NoError(t, err)
+	require.Equal(t, claim.Agent.ID, identity.ContactID)
+	require.Equal(t, "owner-1", identity.OwnerConversationID)
+}
+
+func TestMailboxWidgetFailureKeepsReminderAndIsRetryable(t *testing.T) {
+	t.Setenv(MailboxEnv, "enabled")
+	f := newFixture(t)
+	call := f.call("owner-1")
+	store, identity, err := f.app.mailboxForCall(f.ctx, call)
+	require.NoError(t, err)
+	claim, err := store.Create(f.ctx, identity.OwnerConversationID, "researcher", "task", f.cwd, types.ContextFresh)
+	require.NoError(t, err)
+	_, err = store.SendMail(f.ctx, types.MailboxIdentity{OwnerConversationID: identity.OwnerConversationID, ContactID: claim.Agent.ID}, "main", "Notice", "body")
+	require.NoError(t, err)
+	call.ui.block, call.ui.blockStarted = newEvent(), newEvent()
+	defer call.ui.block.set()
+	page, err := f.runtime.syncMailboxWidget(f.ctx, call.ui, store, identity)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Len(t, page.Mails, 1)
+	require.NotContains(t, f.runtime.mailboxWidgets, mailboxWidgetKey(store, identity))
+	f.app.noteMailboxTools(extension.AgentInitEvent{AllowedTools: []string{"list_mails", "read_mails"}}, call)
+	require.Len(t, f.app.mailboxFollowUp(f.ctx, call).FollowUps, 1)
+	call.ui.block.set()
+	require.Len(t, f.app.mailboxFollowUp(f.ctx, call).FollowUps, 1)
+	require.Contains(t, call.ui.text(mailboxWidgetID), "1 unread")
+}
 
 func TestMailboxNoticesPreserveSystemPromptAndStructuredResults(t *testing.T) {
 	t.Setenv(MailboxEnv, "enabled")
